@@ -94,13 +94,21 @@ export function lageWaehlen(funde, { masse, layout }) {
 }
 
 /**
- * Lage für einen Beitrag: „auto“ wählt anhand der gefundenen Gesichter, sonst gilt die gewählte Lage.
+ * Lage für einen Beitrag: „auto“ wählt anhand der Gesichter in allen Clips des Schnitts, sonst gilt die gewählte.
+ * @param {object} o
+ * @param {{funde:object|null, quelle:{breite:number,hoehe:number}}[]} o.quellen Fundstellen je Clip
  * @returns {{lage:string, automatisch:boolean, hinweise:string[]}}
  */
-export function lageFuer({ e, funde, quelle, masse }) {
+export function lageFuer({ e, quellen, masse }) {
   if (e.untertitelLage !== "auto") return { lage: e.untertitelLage ?? "unten", automatisch: false, hinweise: [] };
-  const umgerechnet = funde ? { ...funde, gesichter: funde.gesichter.map((g) => aufZielflaeche(g, quelle, masse, e.anpassen)) } : null;
+  const mit = quellen.filter((q) => q.funde);
+  const funde = mit.length
+    ? {
+        bilder: mit.reduce((n, q) => n + q.funde.bilder, 0),
+        gesichter: mit.flatMap((q) => q.funde.gesichter.map((g) => aufZielflaeche(g, q.quelle, masse, e.anpassen))),
+      }
+    : null;
   const logoOben = e.logo !== "kein" && !String(e.logoPosition).includes("unten");
-  const wahl = lageWaehlen(umgerechnet, { masse, layout: { position: POSITION_HOCHKANT, zeilen: 1, logo: logoOben } });
+  const wahl = lageWaehlen(funde, { masse, layout: { position: POSITION_HOCHKANT, zeilen: 1, logo: logoOben } });
   return { lage: wahl.lage, automatisch: true, hinweise: wahl.hinweise };
 }

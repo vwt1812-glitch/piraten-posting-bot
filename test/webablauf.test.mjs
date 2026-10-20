@@ -121,6 +121,44 @@ test("Web-Version über die API", { skip: !ffmpeg && "ffmpeg fehlt", timeout: 18
   assert.equal(range.status, 206);
   assert.equal((await range.arrayBuffer()).byteLength, 100);
 
+  // Schneiden: zweiten Clip anhängen, Teile setzen, Untertitel in Clip-Zeit, neu bauen
+  const zweiter = await api(`auftrag/${video.id}/clip?name=zwei.mp4`, { methode: "POST", body: fs.readFileSync(path.join(ordner, "clip.mp4")), typ: "video/mp4" });
+  assert.equal(zweiter.status, 200);
+  do {
+    await new Promise((r) => setTimeout(r, 300));
+    v = await (await api(`auftrag/${video.id}`)).json();
+  } while (v.status === "arbeitet");
+  assert.deepEqual(v.clips.map((c) => [c.id, c.bereit]), [["c1", true], ["c2", true]]);
+  assert.deepEqual(v.schnitt.map((t) => t.clip), ["c1", "c2"]);
+  assert.equal((await api(`auftrag/${video.id}/clip/c2/streifen`)).headers.get("content-type"), "image/jpeg");
+  assert.equal((await api(`auftrag/${video.id}/clip/c2/welle`)).headers.get("content-type"), "image/png");
+  assert.equal((await api(`auftrag/${video.id}/clip/c2/arbeitskopie`)).headers.get("content-type"), "video/mp4");
+  assert.equal((await api(`auftrag/${video.id}/speichern`, { methode: "POST", json: { schnitt: [] } })).status, 400);
+  const geschnitten = await (await api(`auftrag/${video.id}/speichern`, { methode: "POST", json: {
+    schnitt: [{ clip: "c2", von: 0.5, bis: 1.5 }, { clip: "c1", von: 0, bis: 0.5 }, { clip: "c9", von: 0, bis: 1 }],
+    untertitel: [{ clip: "c2", start: 600, end: 1400, text: "Erster Teil" }, { clip: "c1", start: 1000, end: 1900, text: "herausgeschnitten" }],
+  } })).json();
+  assert.deepEqual(geschnitten.schnitt, [{ clip: "c2", von: 0.5, bis: 1.5 }, { clip: "c1", von: 0, bis: 0.5 }]);
+  assert.match(geschnitten.srt, /00:00:00,100 --> 00:00:00,900\nErster Teil/);
+  assert.doesNotMatch(geschnitten.srt, /herausgeschnitten/);
+  assert.equal(geschnitten.geaendert, true);
+  await api(`auftrag/${video.id}/bauen`, { methode: "POST", json: { e: { titelkarte: null, untertitel: true } } });
+  do {
+    await new Promise((r) => setTimeout(r, 300));
+    v = await (await api(`auftrag/${video.id}`)).json();
+  } while (v.status === "arbeitet");
+  assert.equal(v.status, "bereit", v.fehler);
+  const fertig = path.join(ordner, "geschnitten.mp4");
+  fs.writeFileSync(fertig, Buffer.from(await (await api(`auftrag/${video.id}/datei`)).arrayBuffer()));
+  const dauer = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", fertig]).toString());
+  assert.ok(Math.abs(dauer - 1.5) < 0.15, `Dauer ${dauer}`);
+  // Standbild an einer Stelle des Schnitts
+  assert.equal((await api(`auftrag/${video.id}/vorschau`, { methode: "POST", json: { zeit: 1.2 } })).headers.get("content-type"), "image/jpeg");
+  // Clip entfernen
+  const ohne = await (await api(`auftrag/${video.id}/clip/c2/entfernen`, { methode: "POST" })).json();
+  assert.deepEqual(ohne.schnitt, [{ clip: "c1", von: 0, bis: 0.5 }]);
+  assert.equal((await api(`auftrag/${video.id}/clip/c1/entfernen`, { methode: "POST" })).status, 400);
+
   // Ungültige Uploads
   const leer = await api("hochladen?name=x.jpg", { methode: "POST", body: Buffer.from("kein bild"), typ: "image/jpeg" });
   assert.equal(leer.status, 400);

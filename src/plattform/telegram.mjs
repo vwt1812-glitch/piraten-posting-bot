@@ -11,9 +11,9 @@ import { pipeline } from "node:stream/promises";
 
 const MB = 1024 * 1024;
 
-/** Knöpfe [[{text, daten}]] → inline_keyboard */
+/** Knöpfe [[{text, daten}]] bzw. Links [[{text, url}]] → inline_keyboard */
 export const tastatur = (knoepfe) =>
-  knoepfe?.length ? { reply_markup: { inline_keyboard: knoepfe.map((reihe) => reihe.map((k) => ({ text: k.text, callback_data: k.daten }))) } } : {};
+  knoepfe?.length ? { reply_markup: { inline_keyboard: knoepfe.map((reihe) => reihe.map((k) => (k.url ? { text: k.text, url: k.url } : { text: k.text, callback_data: k.daten }))) } } : {};
 
 /** Update der Bot API → Ereignis des Bots (oder null, wenn es den Bot nicht interessiert). */
 export function ereignisAus(update) {

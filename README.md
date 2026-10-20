@@ -50,12 +50,45 @@ Ist ein Text für einen Kanal zu lang (X 280, Bluesky 300, Mastodon 500 …), l�
 „✂️ Automatisch kürzen“ an. 15 Minuten nach jedem Termin schaut er in Postiz nach und meldet sich, wenn etwas hängt
 oder ein Netzwerk abgelehnt hat.
 
+## Zwei Wege: schnell im Chat, gründlich im Browser
+
+- **Telegram/Matrix, wenn es schnell gehen soll:** Video reinschicken, der Bot setzt Logo, Untertitel und Design
+  drauf, Vorschau ansehen, posten – fertig.
+- **Web-Version, wenn geschnitten werden soll:** mehrere Clips, Anfang und Ende kürzen, Stellen herausschneiden,
+  Reihenfolge ändern, Untertitel korrigieren, alles mit Vorschau. Unter jeder Vorschau im Chat steht
+  **„✂️ Im Browser schneiden“** (wenn `WEB_URL` gesetzt ist): Der Link öffnet genau diesen Beitrag in der
+  Web-Version. Er gilt einmal; danach gehört der Beitrag der Person, die ihn im Browser geöffnet hat, und
+  verschwindet aus dem Chat-Menü.
+
 ## Web-Version
 
-Wie ppicng, aber auch für Videos: Sharepic gestalten mit Live-Vorschau, Video hochladen, Format, Logo, Untertitel
-(direkt im Browser korrigierbar), Bauchbinde, Titelkarte und Abspann einstellen, Standbild-Vorschau ansehen,
-bauen, herunterladen – und, wenn freigeschaltet, über Postiz posten. Sie läuft im selben Prozess wie der Bot und
-teilt sich dessen Warteschlange; es geht aber auch ganz ohne Telegram und Matrix.
+Wie ppicng, aber auch für Videos: Sharepic gestalten mit Live-Vorschau; Video hochladen und **schneiden**, Format,
+Logo, Untertitel, Bauchbinde, Titelkarte und Abspann einstellen, Standbild-Vorschau ansehen, bauen, herunterladen –
+und, wenn freigeschaltet, über Postiz posten. Sie läuft im selben Prozess wie der Bot und teilt sich dessen
+Warteschlange; es geht aber auch ganz ohne Telegram und Matrix.
+
+### Schneiden
+
+![Schnitt](docs/schnitt.png)
+
+- **Zeitleiste** mit Filmstreifen und Tonwelle je Teil; klicken oder ziehen springt, die violetten Balken darunter
+  sind die Untertitel.
+- **Abspielen wie geschnitten:** Der Player springt von Teil zu Teil und Clip zu Clip, die Untertitel laufen mit.
+- **Teilen** an der Abspielposition, **Anfang/Ende hier** kürzt den Teil, **Teil entfernen**, **früher/später**
+  verschiebt ihn, Anfang und Ende auch auf die Hundertstelsekunde als Zahl. **Rückgängig/Wiederholen** (100 Schritte).
+- **Mehrere Clips:** weitere Videos hochladen; jeder Clip lässt sich (auch mehrmals) ganz ans Ende hängen.
+  Unterschiedliche Formate passen sich dem Zielformat an (Rand oder Zuschnitt, je Teil).
+- **Untertitel bearbeiten:** Liste aller Untertitel im Schnitt – Text ändern, löschen, neue an der
+  Abspielposition einfügen, Beginn und Ende auf die Abspielposition setzen. Die Untertitel hängen am Clip, nicht
+  am Schnitt: Schneidet man später anders, bleiben sie an der richtigen Stelle.
+- **🖼️ Standbild hier:** zeigt das Bild an der Abspielposition mit Logo, Untertiteln und Bauchbinde, wie es im
+  fertigen Video aussieht.
+- **Tasten:** Leertaste abspielen, ← → ein Bild (mit Umschalt 1 s), S teilen, I/O Anfang/Ende hier, Entf entfernen,
+  Strg+Z / Strg+Y.
+
+Fürs Abspielen im Browser legt der Bot je Clip eine kleine Arbeitskopie an (H.264, 854 px, dichte Keyframes für
+genaues Springen) sowie Filmstreifen und Tonwelle. Gerendert wird aus den Originalen – trim, concat, Untertitel,
+Logo und Bauchbinde in **einem** ffmpeg-Durchgang, damit der Pi nur einmal encodiert.
 
 ![Web-Version](docs/web.png)
 
@@ -202,7 +235,8 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 | Datei | Inhalt |
 |---|---|
 | `src/bot.mjs` | Start; Ablauf im Chat: Eingang, Menüs bedienen, posten, Kontrolle |
-| `src/werkstatt.mjs` | gemeinsam für Bot und Web: Aufträge, Analyse, Bauen, Standbild, Postiz, Warteschlange |
+| `src/werkstatt.mjs` | gemeinsam für Bot und Web: Aufträge, Clips, Schnitt, Untertitel, Analyse, Bauen, Standbild, Postiz, Warteschlange |
+| `src/schnitt.mjs` | Schnittliste prüfen, Zeiten zwischen Clip und fertigem Video umrechnen, Untertitel mitnehmen |
 | `src/web.mjs` · `web/` | Web-Version: HTTP-API (Anmeldung, Upload, Vorschau, Bauen, Posten) und Seite ohne Build-Schritt |
 | `src/gesicht.mjs` · `src/gesicht.py` | Gesicht finden (OpenCV), aufs Zielformat umrechnen, Lage der Untertitel wählen |
 | `src/plattform/telegram.mjs` | Telegram Bot API, Knöpfe |
@@ -210,7 +244,7 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 | `src/menues.mjs` | Texte und Knöpfe aller Menüs (für beide Plattformen gleich) |
 | `src/ppicng.mjs` | ppicng einlesen: Logos samt Varianten, Schriften, Farbschemata, Logosuche |
 | `src/grafik.mjs` | Sharepic, Logo-Plakette, Bauchbinde, Titelkarte im ppicng-Layout (Canvas) |
-| `src/video.mjs` | ffmpeg: Format, Untertitel, Logo, Bauchbinde, Titelkarte und Abspann verketten |
+| `src/video.mjs` | ffmpeg: Schnitt (trim/concat), Format, Untertitel, Logo, Bauchbinde, Titelkarte und Abspann; Arbeitskopien |
 | `src/untertitel.mjs` · `src/whisper.mjs` | SRT/ASS, Korrekturen, Spracherkennung mit whisper.cpp |
 | `src/caption.mjs` | Beitragstext (Claude, OpenAI oder einfacher Vorschlag), Kürzen |
 | `src/postiz.mjs` · `src/kontrolle.mjs` | Postiz Public API, Zeichenzählung, Anfragenlimit, Kontrolle nach dem Posten |

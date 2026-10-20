@@ -2,6 +2,7 @@
 // und/oder Matrix und über die Web-Version, gepostet über Postiz (optional). Start: npm start
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { ladeConfig, chatStandard } from "./config.mjs";
@@ -10,7 +11,7 @@ import { MatrixPlattform } from "./plattform/matrix.mjs";
 import { ladePpicng, sucheLogos } from "./ppicng.mjs";
 import { schriftenAnmelden } from "./grafik.mjs";
 import { ausfuehren, fotoNormalisieren } from "./video.mjs";
-import { parseSrt, formatSrt, parseKorrekturen, wendeKorrekturenAn, parseBauchbinde, volltext } from "./untertitel.mjs";
+import { parseKorrekturen, parseBauchbinde } from "./untertitel.mjs";
 import { kuerzen } from "./caption.mjs";
 import { kundenAus, zeichenLimit, zeichenZahl } from "./postiz.mjs";
 import { erwartetePosts, faelligeKontrollen, abfragezeitraum, auswerten } from "./kontrolle.mjs";
@@ -36,7 +37,6 @@ const von = (a) => plattformen[a.plattform];
 const arbeit = (fn) => werkstatt.arbeit(fn);
 const alleKanaele = () => werkstatt.alleKanaele();
 const standardKanaele = (a) => werkstatt.standardKanaele(a);
-const srtDatei = (a) => werkstatt.srtDatei(a);
 
 // ---------- Kontext für die Menüs ----------
 
@@ -81,6 +81,8 @@ async function menuZeigen(a, menu, { neu = false } = {}) {
 }
 
 async function hauptmenu(a, o) {
+  // Einmal-Schlüssel für „Im Browser schneiden“: Der Beitrag zieht dann in die Web-Version um
+  if (config.web?.url && !a.freigabe) auftraege.aendern(a.id, { freigabe: crypto.randomBytes(16).toString("hex") });
   await menuZeigen(a, M.hauptMenu(a, await kontext(a)), o);
 }
 
@@ -311,7 +313,7 @@ async function knopf(ereignis) {
       auftraege.aendern(a.id, { e, geaendert: true });
       return menuZeigen(a, M.untertitelMenu(a, ctx));
     case "srt":
-      return p.dokument(a.chat, srtDatei(a), { text: "Korrigiert zurückschicken – oder Korrekturen als <code>falsch => richtig</code>." });
+      return p.dokument(a.chat, werkstatt.srtFuerAusgabe(a), { text: "Korrigiert zurückschicken – oder Korrekturen als <code>falsch => richtig</code>." });
     case "korrektur":
       return warte("korrektur", "✏️ Schick mir Korrekturen, eine pro Zeile: <code>falsch => richtig</code> – oder eine <code>.srt</code>-Datei.");
 
@@ -447,10 +449,8 @@ async function eingabe(a, ereignis) {
     if (a.wartetAuf === "korrektur" && /\.srt$/i.test(m.name)) {
       const ziel = path.join(a.ordner, "neu.srt");
       await p.herunterladen(m, ziel);
-      const cues = parseSrt(await fsp.readFile(ziel, "utf8"));
-      if (!cues.length) return p.senden(a.chat, "In der Datei habe ich keine Untertitel gefunden.");
-      await fsp.writeFile(srtDatei(a), formatSrt(cues));
-      auftraege.aendern(a.id, { hatUntertitel: true, transkript: volltext(cues) });
+      const anzahl = werkstatt.srtUebernehmen(a, await fsp.readFile(ziel, "utf8"));
+      if (!anzahl) return p.senden(a.chat, "In der Datei habe ich keine Untertitel gefunden.");
       return gestaltet({ untertitel: true });
     }
     return false; // kein passendes Medium – als neuen Beitrag behandeln
@@ -488,9 +488,7 @@ async function eingabe(a, ereignis) {
     case "korrektur": {
       const korrekturen = parseKorrekturen(text);
       if (!korrekturen.length) return p.senden(a.chat, "Bitte als <code>falsch => richtig</code> schicken, eine pro Zeile.");
-      const cues = wendeKorrekturenAn(parseSrt(await fsp.readFile(srtDatei(a), "utf8")), korrekturen);
-      await fsp.writeFile(srtDatei(a), formatSrt(cues));
-      auftraege.aendern(a.id, { transkript: volltext(cues) });
+      werkstatt.korrigieren(a, korrekturen);
       await p.senden(a.chat, `✏️ ${korrekturen.length} Korrektur(en) übernommen.`);
       return gestaltet({ untertitel: true });
     }

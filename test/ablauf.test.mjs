@@ -162,11 +162,16 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
       VIDEO_FORMAT: "9:16",
       TITELKARTE_DAUER: "1",
       ABSPANN_DAUER: "1",
+      WEB_PORT: "0",
+      WEB_URL: "https://posting.example.de",
+      WEB_PASSWORT: "geheim",
+      GESICHT_PYTHON: "/gibt/es/nicht",
     },
   });
   bot.stdout.on("data", (d) => (ausgabe += d));
   bot.stderr.on("data", (d) => (ausgabe += d));
   await warteAuf(() => /ppicng: \d+ Logos/.test(ausgabe), "Bot startet");
+  const webBasis = ausgabe.match(/web: (http:\/\/\S+)/)[1];
 
   // ---------- Telegram ----------
   const von = { id: 42, first_name: "Anja" };
@@ -192,6 +197,10 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   assert.match(menu.daten.text, /Instagram KV, X KV/); // Kanäle des Kunden vorausgewählt
   const daten = (text) => knoepfe.find((k) => k.text.includes(text)).callback_data;
   const id = daten("Gestaltung").split(":")[0];
+
+  // Link „Im Browser schneiden“ mit Einmal-Schlüssel
+  const link = knoepfe.find((k) => k.url)?.url;
+  assert.match(link, new RegExp(`^https://posting\\.example\\.de/#/uebernehmen/${id}/[0-9a-f]{32}$`));
 
   i = anrufe.length;
   tgKnopf(`${id}:design`);
@@ -219,6 +228,32 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   tgKnopf(`${id}:datei`);
   assert.match((await warteAuf(() => ab(i, "telegram", "sendDocument"), "Datei")).daten.document, /piraten-video-/);
 
+  // ---------- Übernahme in die Web-Version ----------
+  // Ein zweites Video, das nicht gepostet wird, im Browser weiterbearbeiten
+  i = anrufe.length;
+  tgNachricht({ document: { file_id: "F2", file_name: "quelle.mp4", mime_type: "video/mp4", file_size: 1000 } });
+  const menu2 = await warteAuf(() => anrufe.slice(i).find((a) => a.methode === "sendMessage" && a.daten.reply_markup), "Hauptmenü zweites Video");
+  const [, id2, schluessel] = menu2.daten.reply_markup.inline_keyboard.flat().find((k) => k.url).url.match(/uebernehmen\/(\w+)\/(\w+)$/);
+  const login = await fetch(`${webBasis}/api/anmelden`, { method: "POST", headers: { "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ passwort: "geheim", nutzer: "Anja" }) });
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+  const ueber = (s) => fetch(`${webBasis}/api/uebernehmen`, { method: "POST", headers: { Cookie: cookie, "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ id: id2, schluessel: s }) });
+  assert.equal((await ueber("0".repeat(32))).status, 404);
+  const uebernommen = await (await ueber(schluessel)).json();
+  assert.equal(uebernommen.id, id2);
+  assert.deepEqual(uebernommen.clips.map((c) => c.id), ["c1"]);
+  assert.equal((await ueber(schluessel)).status, 404); // nur einmal
+  // Arbeitskopie für den Schnitt entsteht im Hintergrund
+  let w;
+  do {
+    await new Promise((r) => setTimeout(r, 200));
+    w = await (await fetch(`${webBasis}/api/auftrag/${id2}`, { headers: { Cookie: cookie } })).json();
+  } while (w.status === "arbeitet");
+  assert.equal(w.clips[0].bereit, true);
+  // Im Chat gehört der Beitrag jetzt nicht mehr dazu
+  i = anrufe.length;
+  tgKnopf(`${id2}:gestaltung`);
+  assert.match((await warteAuf(() => ab(i, "telegram", "sendMessage"), "Hinweis im Chat")).daten.text, /gibt es nicht mehr/);
+
   // ---------- Matrix ----------
   i = anrufe.length;
   matrixEvents.push({ einladung: "!raum:test", von: "@anja:test" });
@@ -237,7 +272,7 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   i = anrufe.length;
   matrixEvents.push({ raum: "!raum:test", ev: { type: "m.reaction", sender: "@anja:test", content: { "m.relates_to": { rel_type: "m.annotation", event_id: menuId, key } } } });
   const gestaltung = await warteAuf(() => anrufe.slice(i).find((a) => a.dienst === "matrix" && /Gestaltung/.test(a.daten.body ?? "") && /Claim ändern/.test(a.daten.body)), "Gestaltungsmenü");
-  assert.ok(ab(i, "matrix", /\/redact\//), "altes Menü wird gelöscht");
+  await warteAuf(() => ab(i, "matrix", /\/redact\//), "altes Menü wird gelöscht");
 
   // Zahl schicken statt Reaktion: „1“ = Design
   i = anrufe.length;

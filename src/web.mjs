@@ -16,7 +16,8 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { FARBSCHEMATA, logoNachId, logoDatei } from "./ppicng.mjs";
 import { FORMATE, fotoNormalisieren } from "./video.mjs";
-import { parseSrt, formatSrt, volltext } from "./untertitel.mjs";
+import { formatSrt } from "./untertitel.mjs";
+import { schnittPruefen, cuesPruefen, schnittDauer } from "./schnitt.mjs";
 import { kuerzen } from "./caption.mjs";
 import { kundenAus, zeichenLimit, zeichenZahl } from "./postiz.mjs";
 import { istErlaubt } from "./plattform/matrix.mjs";
@@ -135,10 +136,10 @@ export function bereinigen(neu, alt, ppicng) {
 /** Was der Browser über einen Auftrag erfährt (ohne Dateipfade). */
 export function ansicht(a, werkstatt) {
   const karte = (k) => (k ? (k.bild ? { art: "bild" } : { art: "text", claim: k.claim ?? "", text: k.text ?? "" }) : null);
-  let srt = "";
-  try {
-    srt = fs.readFileSync(werkstatt.srtDatei(a), "utf8");
-  } catch {}
+  const clips = werkstatt.clips(a);
+  const schnitt = werkstatt.schnitt(a);
+  const erster = werkstatt.ersterClip(a);
+  const gefunden = clips.filter((c) => c.gesichter !== undefined);
   return {
     id: a.id,
     art: a.art,
@@ -148,15 +149,21 @@ export function ansicht(a, werkstatt) {
     warnungen: a.warnungen ?? [],
     erstellt: a.erstellt,
     e: { ...a.e, bild: Boolean(a.e.bild), titelkarte: karte(a.e.titelkarte), abspann: karte(a.e.abspann) },
-    quelle: a.quelle ? { breite: a.quelle.breite, hoehe: a.quelle.hoehe, dauer: a.quelle.dauer, hatTon: a.quelle.hatTon } : null,
-    srt,
+    quelle: erster ? { breite: erster.breite, hoehe: erster.hoehe, dauer: schnittDauer(schnitt), hatTon: clips.some((c) => c.hatTon) } : null,
+    clips: clips.map((c) => ({
+      id: c.id, name: c.name, breite: c.breite, hoehe: c.hoehe, dauer: c.dauer, hatTon: c.hatTon,
+      bereit: Boolean(c.arbeitskopie), bilder: c.arbeitskopie?.bilder ?? 0, welle: Boolean(c.arbeitskopie?.welle),
+    })),
+    schnitt,
+    untertitel: a.art === "video" ? werkstatt.cues(a) : [],
+    srt: a.art === "video" ? formatSrt(werkstatt.ausgabeCues(a)) : "",
     caption: a.caption ?? "",
     captionHinweis: a.captionHinweis ?? "",
     kanaele: a.kanaele ?? [],
     lage: a.lage ?? null,
     lageAutomatisch: Boolean(a.lageAutomatisch),
     gesichtHinweise: a.gesichtHinweise ?? [],
-    gesichter: a.gesichter?.gesichter?.length ?? null,
+    gesichter: gefunden.length ? gefunden.reduce((n, c) => n + (c.gesichter?.gesichter?.length ?? 0), 0) : null,
     ergebnis: a.ergebnis && fs.existsSync(a.ergebnis) ? { version: fs.statSync(a.ergebnis).mtimeMs, masse: a.masse } : null,
     plan: a.plan ?? null,
     geaendert: Boolean(a.geaendert),
@@ -256,9 +263,10 @@ export async function starteWeb({ config, werkstatt }) {
         await fn((t) => auftraege.aendern(a.id, { schritt: t }));
       } catch (e) {
         console.error(`Web-Auftrag ${a.id}:`, e);
-        auftraege.aendern(a.id, { status: a.ergebnis ? "bereit" : "entwurf", fehler: e.message.slice(0, 1500) });
+        auftraege.aendern(a.id, { status: a.ergebnis && !a.geaendert ? "bereit" : "entwurf", schritt: "", fehler: e.message.slice(0, 1500) });
         return;
       }
+      if (a.status === "arbeitet") auftraege.aendern(a.id, { status: a.ergebnis && !a.geaendert ? "bereit" : "entwurf" });
       auftraege.aendern(a.id, { schritt: "" });
     });
   }
@@ -281,7 +289,7 @@ export async function starteWeb({ config, werkstatt }) {
 
   async function api(req, res, url, nutzer) {
     const teile = url.pathname.split("/").filter(Boolean); // ["api", …]
-    const [, bereich, id, aktion] = teile;
+    const [, bereich, id, aktion, clipId, clipAktion] = teile;
     const m = req.method;
 
     if (bereich === "optionen" && m === "GET") return senden(res, 200, optionen(nutzer));
@@ -320,11 +328,11 @@ export async function starteWeb({ config, werkstatt }) {
         if (istVideo) {
           const original = path.join(a.ordner, `original${path.extname(name) || ".mp4"}`);
           await dateiLesen(req, original);
-          await werkstatt.videoAnnehmen(a, original);
+          await werkstatt.videoAnnehmen(a, original, "", name);
           auftraege.aendern(a.id, { titel: name });
           await werkstatt.kanaeleVorwaehlen(a);
           hintergrund(a, async (schritt) => {
-            const warnungen = await werkstatt.analysieren(a, schritt);
+            const warnungen = await werkstatt.analysieren(a, schritt, { arbeitskopien: true });
             await werkstatt.captionErzeugen(a);
             auftraege.aendern(a.id, { status: "entwurf", warnungen });
           });
@@ -347,6 +355,18 @@ export async function starteWeb({ config, werkstatt }) {
       return senden(res, 200, ansicht(a, werkstatt));
     }
 
+    // Beitrag aus Telegram/Matrix im Browser weiterbearbeiten (Link mit Einmal-Schlüssel aus dem Bot)
+    if (bereich === "uebernehmen" && m === "POST") {
+      const { id: aid, schluessel } = await jsonLesen(req, 10000);
+      const a = auftraege.get(String(aid ?? ""));
+      if (!a || !a.freigabe || !schluessel || !gleich(schluessel, a.freigabe)) throw new HttpFehler(404, "Der Link ist ungültig oder wurde schon benutzt.");
+      if (a.status === "arbeitet") throw new HttpFehler(409, "Der Bot arbeitet gerade noch daran – gleich nochmal versuchen.");
+      if (["gepostet", "geplant", "verworfen"].includes(a.status)) throw new HttpFehler(409, `Der Beitrag ist schon ${a.status}.`);
+      auftraege.aendern(a.id, { plattform: "web", chat: nutzer, chatId: `web|${nutzer}`, freigabe: null, wartetAuf: null, status: a.ergebnis ? "bereit" : "entwurf" });
+      if (a.art === "video") hintergrund(a, (schritt) => werkstatt.analysieren(a, schritt, { arbeitskopien: true }));
+      return senden(res, 200, ansicht(a, werkstatt));
+    }
+
     if (bereich !== "auftrag" || !id) throw new HttpFehler(404, "Unbekannte Adresse.");
     const a = eigenerAuftrag(nutzer, id);
     const beschaeftigt = () => {
@@ -359,10 +379,21 @@ export async function starteWeb({ config, werkstatt }) {
         const e = bereinigen(daten.e, a.e, ppicng);
         auftraege.aendern(a.id, { e, geaendert: true });
       }
-      if (typeof daten.srt === "string" && a.art === "video") {
-        const cues = parseSrt(daten.srt.slice(0, 200000));
-        await fsp.writeFile(werkstatt.srtDatei(a), formatSrt(cues));
-        auftraege.aendern(a.id, { hatUntertitel: cues.length > 0, transkript: volltext(cues), geaendert: true });
+      if (a.art === "video") {
+        const clips = werkstatt.clips(a);
+        try {
+          if (daten.schnitt !== undefined) werkstatt.schnittSetzen(a, schnittPruefen(daten.schnitt, clips));
+          if (daten.untertitel !== undefined) {
+            werkstatt.cuesSchreiben(a, cuesPruefen(daten.untertitel, clips));
+            auftraege.aendern(a.id, { geaendert: true });
+          }
+        } catch (e) {
+          throw new HttpFehler(400, e.message);
+        }
+        if (typeof daten.srt === "string") {
+          werkstatt.srtUebernehmen(a, daten.srt.slice(0, 200000));
+          auftraege.aendern(a.id, { geaendert: true });
+        }
       }
       if (typeof daten.caption === "string") auftraege.aendern(a.id, { caption: daten.caption.slice(0, 20000), captions: {} });
       if (Array.isArray(daten.kanaele)) auftraege.aendern(a.id, { kanaele: daten.kanaele.filter((k) => typeof k === "string").slice(0, 50) });
@@ -380,10 +411,12 @@ export async function starteWeb({ config, werkstatt }) {
 
       // Vorschau mit den Einstellungen aus dem Browser, ohne sie zu speichern
       case "POST vorschau": {
-        const e = bereinigen((await jsonLesen(req)).e, a.e, ppicng);
+        const daten = await jsonLesen(req);
+        const e = bereinigen(daten.e, a.e, ppicng);
         if (a.art === "sharepic") return senden(res, 200, (await werkstatt.sharepicPng(a, e)).png, { "Content-Type": "image/png" });
-        if (a.status === "arbeitet" && !a.quelle) throw new HttpFehler(409, "Das Video ist noch nicht angekommen.");
-        const { datei, lage } = await werkstatt.arbeit(() => werkstatt.standbild(a, e));
+        if (!werkstatt.clips(a).length) throw new HttpFehler(409, "Das Video ist noch nicht angekommen.");
+        const zeit = Number.isFinite(Number(daten.zeit)) && daten.zeit !== null ? Number(daten.zeit) : null;
+        const { datei, lage } = await werkstatt.arbeit(() => werkstatt.standbild(a, e, zeit));
         return senden(res, 200, await fsp.readFile(datei), { "Content-Type": "image/jpeg", "X-Lage": lage.lage });
       }
       case "POST karte": {
@@ -444,7 +477,45 @@ export async function starteWeb({ config, werkstatt }) {
       case "GET vorschaudatei":
         return dateiSenden(req, res, a.vorschauDatei);
       case "GET srt":
-        return dateiSenden(req, res, werkstatt.srtDatei(a), { name: `untertitel-${a.id}.srt`, herunterladen: true });
+        return dateiSenden(req, res, werkstatt.srtFuerAusgabe(a), { name: `untertitel-${a.id}.srt`, herunterladen: true });
+
+      // Weitere Clips für den Schnitt
+      case "POST clip": {
+        if (a.art !== "video") throw new HttpFehler(400, "Nur für Videos.");
+        if (fertig) throw new HttpFehler(409, "Schon gepostet.");
+        if (clipId) {
+          if (clipAktion !== "entfernen") throw new HttpFehler(404, "Unbekannte Adresse.");
+          beschaeftigt();
+          try {
+            werkstatt.clipEntfernen(a, clipId);
+          } catch (e) {
+            throw new HttpFehler(400, e.message);
+          }
+          auftraege.aendern(a.id, { geaendert: true });
+          return senden(res, 200, ansicht(a, werkstatt));
+        }
+        if (werkstatt.clips(a).length >= 30) throw new HttpFehler(400, "Höchstens 30 Clips je Video.");
+        const name = path.basename(url.searchParams.get("name") ?? "clip.mp4");
+        const datei = path.join(a.ordner, `clip-${Date.now()}${path.extname(name) || ".mp4"}`);
+        await dateiLesen(req, datei);
+        try {
+          await werkstatt.clipHinzufuegen(a, datei, name);
+        } catch (e) {
+          await fsp.rm(datei, { force: true });
+          throw new HttpFehler(400, `Das Video ließ sich nicht lesen: ${e.message.split("\n")[0]}`);
+        }
+        auftraege.aendern(a.id, { geaendert: true });
+        if (a.status !== "arbeitet") hintergrund(a, (schritt) => werkstatt.analysieren(a, schritt, { arbeitskopien: true }));
+        else werkstatt.arbeit(() => werkstatt.analysieren(a, () => {}, { arbeitskopien: true })).catch((e) => console.error(e));
+        return senden(res, 200, ansicht(a, werkstatt));
+      }
+      case "GET clip": {
+        const clip = werkstatt.clips(a).find((c) => c.id === clipId);
+        const k = clip?.arbeitskopie;
+        if (!k) throw new HttpFehler(404, "Die Arbeitskopie ist noch nicht fertig.");
+        const datei = { arbeitskopie: k.video, streifen: k.streifen, welle: k.welle }[clipAktion];
+        return dateiSenden(req, res, datei);
+      }
 
       case "GET kanaele": {
         if (!darfPosten(nutzer)) throw new HttpFehler(403, "Posten ist für dich nicht freigeschaltet.");

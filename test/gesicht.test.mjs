@@ -78,10 +78,10 @@ test("Lage „auto“ nutzt die Gesichter im Zielformat, sonst gilt die gewählt
   const hoch = { breite: 1080, hoehe: 1920 };
   const funde = { bilder: 12, gesichter: Array.from({ length: 12 }, () => ({ x: 0.3, y: 0.5, w: 0.4, h: 0.2 })) };
   const e = { untertitelLage: "auto", anpassen: "rand", logo: "common/piraten", logoPosition: "oben-links" };
-  assert.equal(lageFuer({ e, funde, quelle: hoch, masse: hoch }).lage, "oben");
-  assert.equal(lageFuer({ e, funde, quelle: hoch, masse: hoch }).automatisch, true);
+  assert.equal(lageFuer({ e, quellen: [{ funde, quelle: hoch }], masse: hoch }).lage, "oben");
+  assert.equal(lageFuer({ e, quellen: [{ funde, quelle: hoch }], masse: hoch }).automatisch, true);
   // Quer mit Rand: das Gesicht landet in der Mitte des 9:16-Bildes, unten bleibt frei
-  assert.equal(lageFuer({ e, funde: { ...funde, gesichter: funde.gesichter.map((g) => ({ ...g, y: 0.2 })) }, quelle: { breite: 1920, hoehe: 1080 }, masse: hoch }).lage, "unten");
-  assert.deepEqual(lageFuer({ e: { ...e, untertitelLage: "mitte" }, funde, quelle: hoch, masse: hoch }), { lage: "mitte", automatisch: false, hinweise: [] });
-  assert.equal(lageFuer({ e, funde: null, quelle: hoch, masse: hoch }).lage, "unten");
+  assert.equal(lageFuer({ e, quellen: [{ funde: { ...funde, gesichter: funde.gesichter.map((g) => ({ ...g, y: 0.2 })) }, quelle: { breite: 1920, hoehe: 1080 } }], masse: hoch }).lage, "unten");
+  assert.deepEqual(lageFuer({ e: { ...e, untertitelLage: "mitte" }, quellen: [{ funde, quelle: hoch }], masse: hoch }), { lage: "mitte", automatisch: false, hinweise: [] });
+  assert.equal(lageFuer({ e, quellen: [{ funde: null, quelle: hoch }], masse: hoch }).lage, "unten");
 });

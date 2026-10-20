@@ -40,16 +40,20 @@ export function htmlZuText(html) {
 
 /** Knöpfe [[{text, daten}]] als Liste untereinander, nummeriert. */
 export function menuListe(knoepfe) {
-  return (knoepfe ?? []).flat().map((k, i) => ({ ...k, zeichen: ZIFFERN[i] ?? `${i + 1}.` }));
+  return (knoepfe ?? []).flat().filter((k) => !k.url).map((k, i) => ({ ...k, zeichen: ZIFFERN[i] ?? `${i + 1}.` }));
 }
 
 /** Nachrichteninhalt samt nummeriertem Menü. */
 export function inhalt(html, knoepfe) {
   const liste = menuListe(knoepfe);
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const zeilen = liste.map((k) => `${k.zeichen} ${k.text}`);
+  // Links (z. B. „Im Browser schneiden“) stehen ohne Nummer darunter
+  const links = (knoepfe ?? []).flat().filter((k) => k.url);
+  const zeilen = [...liste.map((k) => `${k.zeichen} ${k.text}`), ...links.map((k) => `${k.text}: ${k.url}`)];
   const body = htmlZuText(html) + (zeilen.length ? `\n\n${zeilen.join("\n")}` : "");
-  const formatted = html.replace(/\n/g, "<br>") + (zeilen.length ? `<br><br>${liste.map((k) => `${k.zeichen} ${esc(k.text)}`).join("<br>")}` : "");
+  const formatted = html.replace(/\n/g, "<br>") + (zeilen.length
+    ? `<br><br>${[...liste.map((k) => `${k.zeichen} ${esc(k.text)}`), ...links.map((k) => `<a href="${esc(k.url)}">${esc(k.text)}</a>`)].join("<br>")}`
+    : "");
   return { msgtype: "m.text", body, format: "org.matrix.custom.html", formatted_body: formatted };
 }
 

@@ -83,7 +83,6 @@ function meldung(ziel, text, art = "fehler") {
 }
 
 const logoUrl = (id, schrift = "000000") => `/api/logo/${id}?schrift=${schrift.replace("#", "")}`;
-const dauerText = (s) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
 
 // ---------- Anmeldung ----------
 
@@ -196,6 +195,437 @@ async function meineSeite() {
   );
 }
 
+// ---------- Schnitt (gleiche Rechnung wie src/schnitt.mjs) ----------
+
+const teilDauer = (t) => t.bis - t.von;
+const schnittDauer = (schnitt) => schnitt.reduce((s, t) => s + teilDauer(t), 0);
+function teilAnfaenge(schnitt) {
+  let t = 0;
+  return schnitt.map((teil) => {
+    const anfang = t;
+    t += teilDauer(teil);
+    return anfang;
+  });
+}
+function imClip(schnitt, zeit) {
+  const anfaenge = teilAnfaenge(schnitt);
+  for (let i = 0; i < schnitt.length; i++) {
+    if (zeit < anfaenge[i] + teilDauer(schnitt[i]) || i === schnitt.length - 1) {
+      return { index: i, clip: schnitt[i].clip, t: Math.min(schnitt[i].bis, Math.max(schnitt[i].von, schnitt[i].von + zeit - anfaenge[i])) };
+    }
+  }
+  return null;
+}
+function schnittCues(cues, schnitt) {
+  const anfaenge = teilAnfaenge(schnitt);
+  const ergebnis = [];
+  schnitt.forEach((teil, i) => {
+    cues.forEach((c, index) => {
+      if (c.clip !== teil.clip || c.end <= teil.von * 1000 || c.start >= teil.bis * 1000) return;
+      const start = Math.round(Math.max(c.start, teil.von * 1000) - teil.von * 1000 + anfaenge[i] * 1000);
+      const end = Math.round(Math.min(c.end, teil.bis * 1000) - teil.von * 1000 + anfaenge[i] * 1000);
+      if (end - start >= 200) ergebnis.push({ start, end, text: c.text, index });
+    });
+  });
+  return ergebnis.sort((x, y) => x.start - y.start);
+}
+const zeitGenau = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+
+/**
+ * Schnittplatz: Arbeitskopien abspielen, als wäre schon geschnitten; Teile teilen, kürzen, entfernen,
+ * verschieben; Clips anhängen; Untertitel im Schnitt bearbeiten. Speichert selbst, meldet Änderungen.
+ */
+function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, untertitelAn }) {
+  const clips = new Map(a.clips.map((c) => [c.id, c]));
+  let schnitt = structuredClone(a.schnitt);
+  let cues = structuredClone(a.untertitel);
+  let auswahl = 0;
+  let zeit = 0;
+  let aktiv = 0; // Teil, der gerade im Player liegt
+  let spielt = false;
+  let wechselt = false;
+  let aktiverCue = null;
+  const verlauf = [];
+  const zukunft = [];
+  const FPS = 25;
+
+  const video = el("video", { playsinline: true, preload: "auto", class: "schnitt-video" });
+  const untertitelZeile = el("div", { class: "schnitt-ut", hidden: true });
+  const zeitAnzeige = el("span", { class: "zeit" });
+  const hinweis = el("div", { class: "leise", role: "status" });
+  const zeitleiste = el("div", { class: "zeitleiste", tabindex: "0", "aria-label": "Zeitleiste – klicken oder ziehen zum Springen" });
+  const teileSpur = el("div", { class: "spur-teile" });
+  const utSpur = el("div", { class: "spur-ut" });
+  const abspielkopf = el("div", { class: "abspielkopf" });
+  zeitleiste.append(teileSpur, utSpur, abspielkopf);
+  const teilInfo = el("div");
+  const clipListe = el("div");
+  const cueListe = el("ol", { class: "cues" });
+
+  const speichernSchnitt = verzoegert(() => anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { schnitt } }).catch((err) => meldung(hinweis, err.message)), 600);
+  const speichernCues = verzoegert(() => anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { untertitel: cues } }).catch((err) => meldung(hinweis, err.message)), 800);
+
+  const dauer = () => schnittDauer(schnitt);
+  const sagen = (text) => (hinweis.textContent = text);
+
+  // --- Abspielen ---
+  async function laden(clipId) {
+    if (video.dataset.clip === clipId) return;
+    const clip = clips.get(clipId);
+    if (!clip?.bereit) throw new Error(`„${clip?.name ?? clipId}“ wird noch vorbereitet.`);
+    video.dataset.clip = clipId;
+    video.src = `/api/auftrag/${id}/clip/${clipId}/arbeitskopie`;
+    await new Promise((resolve, reject) => {
+      video.addEventListener("loadedmetadata", resolve, { once: true });
+      video.addEventListener("error", () => reject(new Error("Arbeitskopie lässt sich nicht abspielen.")), { once: true });
+    });
+  }
+  async function springe(t) {
+    zeit = Math.max(0, Math.min(t, Math.max(0, dauer() - 0.001)));
+    const ort = imClip(schnitt, zeit);
+    if (!ort) return;
+    aktiv = ort.index;
+    try {
+      await laden(ort.clip);
+      video.currentTime = ort.t;
+    } catch (err) {
+      sagen(err.message);
+    }
+    anzeigen();
+  }
+  async function abspielen() {
+    if (spielt) return pause();
+    if (zeit >= dauer() - 0.05) await springe(0);
+    else await springe(zeit);
+    spielt = true;
+    knopfPlay.textContent = "⏸";
+    await video.play().catch(() => {});
+    requestAnimationFrame(schleife);
+  }
+  function pause() {
+    spielt = false;
+    knopfPlay.textContent = "▶";
+    video.pause();
+  }
+  async function schleife() {
+    if (!spielt) return;
+    if (!wechselt) {
+      const teil = schnitt[aktiv];
+      const anfaenge = teilAnfaenge(schnitt);
+      const ct = video.currentTime;
+      zeit = anfaenge[aktiv] + Math.max(0, ct - teil.von);
+      if (ct >= teil.bis - 0.02 || video.ended) {
+        const naechster = schnitt[aktiv + 1];
+        if (!naechster) {
+          zeit = dauer();
+          pause();
+        } else if (naechster.clip === teil.clip && Math.abs(naechster.von - teil.bis) < 0.05) {
+          aktiv++;
+        } else {
+          wechselt = true;
+          aktiv++;
+          try {
+            await laden(naechster.clip);
+            video.currentTime = naechster.von;
+            await video.play();
+          } catch (err) {
+            sagen(err.message);
+            pause();
+          }
+          wechselt = false;
+        }
+      }
+      anzeigen();
+    }
+    requestAnimationFrame(schleife);
+  }
+
+  // --- Bearbeiten ---
+  function aendern(fn, text) {
+    verlauf.push(structuredClone({ schnitt, cues }));
+    if (verlauf.length > 100) verlauf.shift();
+    zukunft.length = 0;
+    fn();
+    nachAenderung(text);
+  }
+  function nachAenderung(text) {
+    auswahl = Math.max(0, Math.min(auswahl, schnitt.length - 1));
+    zeit = Math.min(zeit, Math.max(0, dauer() - 0.001));
+    speichernSchnitt();
+    speichernCues();
+    geaendertMelden();
+    zeichnen();
+    springe(zeit);
+    if (text) sagen(text);
+  }
+  function rueckgaengig(nach = verlauf, von = zukunft, text = "Rückgängig gemacht.") {
+    if (!nach.length) return sagen("Nichts mehr rückgängig zu machen.");
+    von.push(structuredClone({ schnitt, cues }));
+    ({ schnitt, cues } = nach.pop());
+    nachAenderung(text);
+  }
+  const wiederholen = () => rueckgaengig(zukunft, verlauf, "Wiederholt.");
+
+  function teilen() {
+    const ort = imClip(schnitt, zeit);
+    const teil = schnitt[ort.index];
+    if (ort.t - teil.von < 0.1 || teil.bis - ort.t < 0.1) return sagen("Zu nah am Rand des Teils – etwas weiter in die Mitte.");
+    aendern(() => {
+      schnitt.splice(ort.index, 1, { ...teil, bis: ort.t }, { ...teil, von: ort.t });
+      auswahl = ort.index + 1;
+    }, "✂️ Geteilt – jetzt z. B. ein Teil auswählen und entfernen.");
+  }
+  function entfernen(i = auswahl) {
+    if (schnitt.length < 2) return sagen("Der letzte Teil bleibt.");
+    const anfang = teilAnfaenge(schnitt)[i];
+    aendern(() => {
+      schnitt.splice(i, 1);
+      zeit = anfang;
+      auswahl = Math.min(i, schnitt.length - 1);
+    }, "🗑️ Teil entfernt.");
+  }
+  function kuerzen(seite) {
+    const ort = imClip(schnitt, zeit);
+    const teil = schnitt[ort.index];
+    if (seite === "anfang" && teil.bis - ort.t < 0.1) return sagen("Dann bliebe nichts übrig.");
+    if (seite === "ende" && ort.t - teil.von < 0.1) return sagen("Dann bliebe nichts übrig.");
+    aendern(() => {
+      if (seite === "anfang") {
+        teil.von = ort.t;
+        zeit = teilAnfaenge(schnitt)[ort.index];
+      } else {
+        teil.bis = ort.t;
+      }
+      auswahl = ort.index;
+    }, seite === "anfang" ? "⇤ Anfang des Teils gekürzt." : "⇥ Ende des Teils gekürzt.");
+  }
+  function verschieben(richtung) {
+    const ziel = auswahl + richtung;
+    if (ziel < 0 || ziel >= schnitt.length) return;
+    aendern(() => {
+      [schnitt[auswahl], schnitt[ziel]] = [schnitt[ziel], schnitt[auswahl]];
+      auswahl = ziel;
+      zeit = teilAnfaenge(schnitt)[ziel];
+    }, "↔ Verschoben.");
+  }
+  function grenzeSetzen(feld, wert) {
+    const teil = schnitt[auswahl];
+    const clip = clips.get(teil.clip);
+    const v = Math.max(0, Math.min(Number(wert), clip.dauer));
+    if (!Number.isFinite(v)) return;
+    const neu = { ...teil, [feld]: v };
+    if (neu.bis - neu.von < 0.1) return sagen("Ein Teil muss mindestens 0,1 s lang sein.");
+    aendern(() => {
+      schnitt[auswahl] = neu;
+    });
+  }
+  function ganzAnhaengen(clip) {
+    aendern(() => {
+      schnitt.push({ clip: clip.id, von: 0, bis: clip.dauer });
+      auswahl = schnitt.length - 1;
+    }, `„${clip.name}“ ans Ende angehängt.`);
+  }
+
+  // --- Untertitel ---
+  function cueHier() {
+    const ort = imClip(schnitt, zeit);
+    const teil = schnitt[ort.index];
+    const ende = Math.min(teil.bis, ort.t + 2);
+    if (ende - ort.t < 0.3) return sagen("Zu nah am Ende des Teils.");
+    aendern(() => {
+      cues.push({ clip: ort.clip, start: Math.round(ort.t * 1000), end: Math.round(ende * 1000), text: "Neuer Untertitel" });
+      aktiverCue = cues.length - 1;
+    }, "💬 Untertitel eingefügt – Text unten eintragen.");
+    untertitelAn();
+    cueListe.querySelector(`[data-index="${aktiverCue}"] input`)?.select();
+  }
+  function cueGrenze(seite) {
+    if (aktiverCue === null || !cues[aktiverCue]) return sagen("Erst einen Untertitel in der Liste antippen.");
+    const ort = imClip(schnitt, zeit);
+    const c = cues[aktiverCue];
+    if (ort.clip !== c.clip) return sagen("Die Abspielposition liegt in einem anderen Clip als dieser Untertitel.");
+    const ms = Math.round(ort.t * 1000);
+    if (seite === "start" ? c.end - ms < 200 : ms - c.start < 200) return sagen("Dann wäre der Untertitel zu kurz.");
+    aendern(() => {
+      cues[aktiverCue] = { ...c, [seite === "start" ? "start" : "end"]: ms };
+    });
+  }
+
+  // --- Anzeige ---
+  function anzeigen() {
+    const d = dauer();
+    abspielkopf.style.left = `${d ? (zeit / d) * 100 : 0}%`;
+    zeitAnzeige.textContent = `${zeitGenau(zeit)} / ${zeitGenau(d)}`;
+    const ms = zeit * 1000;
+    const jetzt = schnittCues(cues, schnitt).find((c) => ms >= c.start && ms < c.end);
+    untertitelZeile.hidden = !jetzt;
+    untertitelZeile.textContent = jetzt?.text ?? "";
+    for (const li of cueListe.children) li.classList.toggle("jetzt", Number(li.dataset.index) === jetzt?.index);
+  }
+
+  function zeichnen() {
+    const d = dauer() || 1;
+    teileSpur.replaceChildren(...schnitt.map((teil, i) => {
+      const clip = clips.get(teil.clip);
+      const td = teilDauer(teil);
+      const breite = `${(clip.dauer / td) * 100}%`;
+      const links = `${(-teil.von / td) * 100}%`;
+      return el("div", {
+        class: `teil${i === auswahl ? " gewaehlt" : ""}`, style: { flexGrow: String(td) }, title: `${clip.name}: ${zeitGenau(teil.von)}–${zeitGenau(teil.bis)}`,
+      },
+      clip.bereit && clip.bilder ? el("img", { class: "streifen", src: `/api/auftrag/${id}/clip/${clip.id}/streifen`, alt: "", draggable: "false", style: { width: breite, left: links } }) : el("span", { class: "leise" }, "wird vorbereitet …"),
+      clip.welle ? el("img", { class: "welle", src: `/api/auftrag/${id}/clip/${clip.id}/welle`, alt: "", draggable: "false", style: { width: breite, left: links } }) : null,
+      el("span", { class: "teil-name" }, clips.size > 1 ? clip.name : `${i + 1}`));
+    }));
+    const aus = schnittCues(cues, schnitt);
+    utSpur.replaceChildren(...aus.map((c) => el("div", {
+      class: "ut-block", title: c.text,
+      style: { left: `${(c.start / 1000 / d) * 100}%`, width: `${((c.end - c.start) / 1000 / d) * 100}%` },
+    })));
+    const teil = schnitt[auswahl];
+    const clip = clips.get(teil.clip);
+    const zahl = (feld) => el("input", { type: "number", step: "0.1", min: "0", max: String(clip.dauer.toFixed(1)), value: teil[feld].toFixed(2), "aria-label": feld === "von" ? "Anfang im Clip (Sekunden)" : "Ende im Clip (Sekunden)", onchange: (ev) => grenzeSetzen(feld, ev.target.value) });
+    teilInfo.replaceChildren(
+      el("strong", {}, `Teil ${auswahl + 1} von ${schnitt.length}`), " · ", clip.name,
+      el("div", { class: "reihe zahlen" }, el("label", { class: "zeile" }, "von", zahl("von")), el("label", { class: "zeile" }, "bis", zahl("bis")), el("span", { class: "leise" }, `s im Clip (${zeitGenau(clip.dauer)})`)),
+      el("div", { class: "reihe" },
+        el("button", { type: "button", class: "zweit klein", onclick: () => verschieben(-1), disabled: auswahl === 0 }, "◀ früher"),
+        el("button", { type: "button", class: "zweit klein", onclick: () => verschieben(1), disabled: auswahl === schnitt.length - 1 }, "später ▶"),
+        el("button", { type: "button", class: "zweit klein", onclick: () => entfernen(), disabled: schnitt.length < 2 }, "🗑️ Teil entfernen")));
+    clipListe.replaceChildren(
+      el("strong", {}, "Clips"),
+      el("ul", { class: "clipliste" }, [...clips.values()].map((c) => el("li", {},
+        el("span", {}, `${c.name} · ${zeitGenau(c.dauer)}${c.bereit ? "" : " · wird vorbereitet"}`),
+        el("span", { class: "reihe" },
+          el("button", { type: "button", class: "zweit klein", title: "Ganzen Clip ans Ende hängen", onclick: () => ganzAnhaengen(c) }, "+ anhängen"),
+          clips.size > 1 ? el("button", { type: "button", class: "zweit klein", title: "Clip aus dem Projekt löschen", onclick: async () => {
+            if (!confirm(`„${c.name}“ aus dem Projekt löschen?`)) return;
+            try {
+              await anfrage(`auftrag/${id}/clip/${c.id}/entfernen`, { methode: "POST" });
+              neuLaden();
+            } catch (err) {
+              sagen(err.message);
+            }
+          } }, "✕") : null)))),
+      clipHochladen);
+    cueListe.replaceChildren(...aus.map((c) => {
+      const eingabe = el("input", { type: "text", maxlength: 300, "aria-label": `Untertitel ab ${zeitGenau(c.start / 1000)}`, oninput: () => {
+        cues[c.index] = { ...cues[c.index], text: eingabe.value };
+        speichernCues();
+        geaendertMelden();
+        utSpur.children[aus.indexOf(c)]?.setAttribute("title", eingabe.value);
+      }, onfocus: () => {
+        aktiverCue = c.index;
+        markieren();
+      } });
+      eingabe.value = c.text;
+      return el("li", { "data-index": String(c.index), class: c.index === aktiverCue ? "aktiv" : "" },
+        el("button", { type: "button", class: "zweit klein zeitknopf", title: "Hierhin springen", onclick: () => {
+          aktiverCue = c.index;
+          markieren();
+          springe(c.start / 1000 + 0.01);
+        } }, zeitGenau(c.start / 1000)),
+        eingabe,
+        el("button", { type: "button", class: "zweit klein", title: "Untertitel löschen", "aria-label": "Untertitel löschen", onclick: () => aendern(() => {
+          cues.splice(c.index, 1);
+          aktiverCue = null;
+        }, "Untertitel gelöscht.") }, "✕"));
+    }));
+    anzeigen();
+  }
+  function markieren() {
+    for (const li of cueListe.children) li.classList.toggle("aktiv", Number(li.dataset.index) === aktiverCue);
+  }
+
+  // Weiteren Clip hochladen
+  const clipFortschritt = el("div", { class: "fortschritt", hidden: true }, el("div"));
+  const clipDatei = el("input", { type: "file", accept: "video/*", class: "unsichtbar", id: "clip-datei", onchange: async () => {
+    const f = clipDatei.files[0];
+    if (!f) return;
+    clipFortschritt.hidden = false;
+    try {
+      await hochladen(`auftrag/${id}/clip?name=${encodeURIComponent(f.name)}`, f, (p) => (clipFortschritt.firstChild.style.width = `${Math.round(p * 100)}%`));
+      neuLaden();
+    } catch (err) {
+      sagen(err.message);
+      clipFortschritt.hidden = true;
+    }
+  } });
+  const clipHochladen = el("div", {}, el("label", { for: "clip-datei", class: "knopf zweit klein", tabindex: "0" }, "＋ Weiteren Clip hochladen"), clipDatei, clipFortschritt);
+
+  // --- Bedienung ---
+  const knopf = (text, titel, fn, cls = "zweit klein") => el("button", { type: "button", class: cls, title: titel, "aria-label": titel, onclick: fn }, text);
+  const knopfPlay = knopf("▶", "Abspielen/Pause (Leertaste)", abspielen, "klein");
+  const werkzeuge = el("div", { class: "werkzeuge" },
+    knopf("⏮", "Zum Anfang", () => springe(0)),
+    knopf("◀︎|", "Ein Bild zurück (←)", () => springe(zeit - 1 / FPS)),
+    knopfPlay,
+    knopf("|▶︎", "Ein Bild vor (→)", () => springe(zeit + 1 / FPS)),
+    zeitAnzeige,
+    knopf("✂️ Teilen", "Teil an der Abspielposition teilen (S)", teilen),
+    knopf("⇤ Anfang hier", "Anfang des Teils auf die Abspielposition setzen (I)", () => kuerzen("anfang")),
+    knopf("Ende hier ⇥", "Ende des Teils auf die Abspielposition setzen (O)", () => kuerzen("ende")),
+    knopf("🗑️", "Ausgewählten Teil entfernen (Entf)", () => entfernen()),
+    knopf("↶", "Rückgängig (Strg+Z)", () => rueckgaengig()),
+    knopf("↷", "Wiederholen (Strg+Y)", wiederholen),
+    knopf("🖼️ Standbild hier", "Standbild mit Logo, Untertiteln und Bauchbinde an dieser Stelle", () => standbildHier(zeit)));
+
+  // Zeitleiste: klicken oder ziehen
+  let zieht = false;
+  const zeitAus = (ev) => {
+    const r = zeitleiste.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * dauer();
+  };
+  zeitleiste.addEventListener("pointerdown", (ev) => {
+    zieht = true;
+    zeitleiste.setPointerCapture(ev.pointerId);
+    if (spielt) pause();
+    const t = zeitAus(ev);
+    auswahl = imClip(schnitt, t).index;
+    zeichnen();
+    springe(t);
+  });
+  zeitleiste.addEventListener("pointermove", (ev) => zieht && springe(zeitAus(ev)));
+  zeitleiste.addEventListener("pointerup", () => (zieht = false));
+
+  const tasten = (ev) => {
+    if (!document.body.contains(zeitleiste)) return document.removeEventListener("keydown", tasten);
+    if (ev.target.closest("input, textarea, select, [contenteditable]")) return;
+    const strg = ev.ctrlKey || ev.metaKey;
+    const t = ev.key.toLowerCase();
+    const aktionen = {
+      " ": abspielen, s: teilen, i: () => kuerzen("anfang"), o: () => kuerzen("ende"), delete: () => entfernen(), backspace: () => entfernen(),
+      arrowleft: () => springe(zeit - (ev.shiftKey ? 1 : 1 / FPS)), arrowright: () => springe(zeit + (ev.shiftKey ? 1 : 1 / FPS)),
+      home: () => springe(0), end: () => springe(dauer() - 0.01),
+    };
+    if (strg && t === "z") aktionen.x = ev.shiftKey ? wiederholen : () => rueckgaengig();
+    else if (strg && t === "y") aktionen.x = wiederholen;
+    const fn = strg ? aktionen.x : aktionen[t];
+    if (!fn) return;
+    ev.preventDefault();
+    fn();
+  };
+  document.addEventListener("keydown", tasten);
+
+  const element = el("section", { class: "karte schnittplatz", "aria-label": "Schnitt" },
+    el("h2", {}, "✂️ Schnitt"),
+    el("div", { class: "schnitt-oben" },
+      el("div", { class: "spieler" }, video, untertitelZeile),
+      el("div", { class: "schnitt-seite" }, teilInfo, clipListe)),
+    werkzeuge, zeitleiste, hinweis,
+    el("p", { class: "leise tasten" }, "Tasten: Leertaste abspielen · ← → ein Bild (mit Umschalt: 1 s) · S teilen · I/O Anfang/Ende hier · Entf Teil entfernen · Strg+Z rückgängig"),
+    el("details", { class: "ut-bearbeiten", open: cues.length > 0 },
+      el("summary", {}, "Untertitel bearbeiten"),
+      el("div", { class: "reihe" },
+        knopf("💬 Untertitel hier einfügen", "Neuer Untertitel an der Abspielposition", cueHier),
+        knopf("⇤ Beginn hier", "Ausgewählter Untertitel beginnt an der Abspielposition", () => cueGrenze("start")),
+        knopf("Ende hier ⇥", "Ausgewählter Untertitel endet an der Abspielposition", () => cueGrenze("ende"))),
+      cueListe));
+  zeichnen();
+  springe(0);
+  return { element, stand: () => ({ schnitt, untertitel: cues }) };
+}
+
 // ---------- Editor ----------
 
 async function editor(id) {
@@ -209,7 +639,10 @@ async function editor(id) {
   const aktionen = el("div");
   const formular = el("div", { class: "karte" });
   const seitenleiste = el("div", { class: "vorschau-spalte" }, el("div", { class: "karte" }, vorschau, vorschauInfo, status, aktionen));
-  app.replaceChildren(el("div", { class: "editor" }, formular, seitenleiste));
+  const oben = el("div");
+  let platz = null;
+  let standbildZeit = null;
+  app.replaceChildren(oben, el("div", { class: "editor" }, formular, seitenleiste));
 
   // --- Speichern und Vorschau ---
   const speichern = verzoegert(async () => {
@@ -231,11 +664,11 @@ async function editor(id) {
     const nr = ++vorschauNr;
     vorschau.classList.add("arbeitet");
     try {
-      const res = await anfrage(`auftrag/${id}/vorschau`, { methode: "POST", json: { e }, roh: true });
+      const res = await anfrage(`auftrag/${id}/vorschau`, { methode: "POST", json: { e, zeit: standbildZeit }, roh: true });
       const blob = await res.blob();
       if (nr !== vorschauNr) return;
       const lage = res.headers.get("X-Lage");
-      bildZeigen(blob, istVideo ? `Standbild${e.untertitel && lage ? ` · Untertitel ${{ unten: "unten", mitte: "Mitte", oben: "oben" }[lage]}${e.untertitelLage === "auto" ? " (automatisch)" : ""}` : ""}` : null);
+      bildZeigen(blob, istVideo ? `Standbild${standbildZeit !== null ? ` bei ${zeitGenau(standbildZeit)}` : ""}${e.untertitel && lage ? ` · Untertitel ${{ unten: "unten", mitte: "Mitte", oben: "oben" }[lage]}${e.untertitelLage === "auto" ? " (automatisch)" : ""}` : ""}` : null);
     } catch (err) {
       if (nr === vorschauNr && err.name !== "AbortError") vorschau.replaceChildren(el("p", { class: "fehler" }, err.message));
     } finally {
@@ -377,20 +810,13 @@ async function editor(id) {
   }
 
   function untertitelBereich() {
-    const srt = el("textarea", { class: "srt", id: "srt", spellcheck: "true" });
+    const srt = el("textarea", { class: "srt", id: "srt", spellcheck: "false" });
     srt.value = a.srt;
-    const srtSpeichern = verzoegert(async () => {
-      try {
-        a = await anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { srt: srt.value } });
-        a.geaendert = true;
-        vorschauLaden();
-        zeigeAktionen();
-      } catch {}
-    }, 1000);
-    srt.addEventListener("input", srtSpeichern);
+    const srtFehler = el("div");
     const lagen = Object.entries(optionen.lagen).map(([w, t]) => [w, w === "auto" ? "automatisch (Gesicht bleibt frei)" : t]);
     const infos = [];
-    if (!optionen.funktionen.whisper) infos.push("Spracherkennung ist nicht eingerichtet – Untertitel als SRT hier hineinkopieren.");
+    if (!optionen.funktionen.whisper) infos.push("Spracherkennung ist nicht eingerichtet – Untertitel oben im Schnitt einfügen oder eine SRT hier einsetzen.");
+    else infos.push("Text korrigieren, neue Untertitel einfügen und Zeiten anpassen: oben im Schnitt unter „Untertitel bearbeiten“.");
     if (a.gesichter !== null && optionen.funktionen.gesicht) infos.push(a.gesichter ? `🙂 Gesicht in ${a.gesichter} Probebildern gefunden.` : "🙂 Kein Gesicht gefunden – Untertitel bleiben unten.");
     for (const h of a.gesichtHinweise) infos.push(`💡 ${h}`);
     return el("details", { open: e.untertitel },
@@ -398,10 +824,27 @@ async function editor(id) {
       haken("untertitel", "Untertitel einblenden"),
       ...auswahl("untertitelLage", lagen, "Lage"),
       ...auswahl("untertitelStil", [["box", "Fläche im Design (wie ppicng)"], ["rand", "Weiß mit Kontur"]], "Stil"),
-      el("label", { for: "srt" }, "Text und Zeiten (SRT) – hier direkt korrigieren"),
-      srt,
       infos.map((t) => el("p", { class: "leise" }, t)),
-      a.srt ? el("p", {}, el("a", { href: `/api/auftrag/${id}/srt` }, "SRT herunterladen")) : null);
+      el("details", {},
+        el("summary", { class: "klein" }, "SRT-Datei: herunterladen oder einsetzen"),
+        a.srt ? el("p", {}, el("a", { href: `/api/auftrag/${id}/srt` }, "SRT des Schnitts herunterladen")) : null,
+        el("label", { for: "srt" }, "SRT einsetzen (Zeiten im fertigen Schnitt; ersetzt die sichtbaren Untertitel)"),
+        srt,
+        el("p", {}, el("button", { type: "button", class: "zweit klein", onclick: async () => {
+          try {
+            await anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { srt: srt.value } });
+            neuLaden();
+          } catch (err) {
+            meldung(srtFehler, err.message);
+          }
+        } }, "Übernehmen")),
+        srtFehler));
+  }
+
+  async function neuLaden() {
+    a = await anfrage(`auftrag/${id}`);
+    if (a.status === "arbeitet") beobachten();
+    else aufbauen();
   }
 
   function bauchbindeBereich() {
@@ -553,7 +996,7 @@ async function editor(id) {
   async function bauen() {
     a.fehler = "";
     try {
-      a = await anfrage(`auftrag/${id}/bauen`, { methode: "POST", json: { e, caption: textBereich.wert() } });
+      a = await anfrage(`auftrag/${id}/bauen`, { methode: "POST", json: { e, caption: textBereich.wert(), ...(platz ? platz.stand() : {}) } });
     } catch (err) {
       a.fehler = err.message;
     }
@@ -584,6 +1027,7 @@ async function editor(id) {
     while (!abbruch.signal.aborted) {
       if (a.status !== "arbeitet") break;
       status.replaceChildren(el("div", { class: "schritt" }, el("span", { class: "drehen", "aria-hidden": "true" }), a.schritt || "Arbeite …"));
+      if (!a.ergebnis || a.geaendert) oben.querySelector(".schnittplatz")?.classList.add("gesperrt");
       aktionen.replaceChildren();
       await new Promise((r) => setTimeout(r, 1500));
       try {
@@ -601,7 +1045,7 @@ async function editor(id) {
     e = structuredClone(a.e);
     logoBereich = logoBereichBauen();
     const kopf = istVideo
-      ? [el("h1", {}, "🎬 Video"), a.quelle ? el("p", { class: "leise" }, `${a.quelle.breite}×${a.quelle.hoehe}, ${dauerText(a.quelle.dauer)} min${a.quelle.hatTon ? "" : ", ohne Ton"}`) : null]
+      ? [el("h1", {}, "🎬 Gestaltung"), a.quelle ? el("p", { class: "leise" }, `${a.clips.length === 1 ? "1 Clip" : `${a.clips.length} Clips`}, erster ${a.quelle.breite}×${a.quelle.hoehe}${a.quelle.hatTon ? "" : ", ohne Ton"}`) : null]
       : [el("h1", {}, "🖼️ Sharepic")];
     const teile = [...kopf];
     if (!istVideo) {
@@ -622,6 +1066,28 @@ async function editor(id) {
       location.hash = "#/meine";
     } }, "🗑️ Verwerfen")));
     formular.replaceChildren(...teile);
+    platz = istVideo && a.clips.length
+      ? schnittplatz({
+        id, a,
+        geaendertMelden: () => {
+          a.geaendert = true;
+          zeigeAktionen();
+        },
+        standbildHier: (t) => {
+          standbildZeit = t;
+          vorschauLaden.sofort();
+          seitenleiste.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        },
+        neuLaden,
+        untertitelAn: () => {
+          if (e.untertitel) return;
+          setze("untertitel", true);
+          const haken = formular.querySelector("details input[type=checkbox]");
+          if (haken) haken.checked = true;
+        },
+      })
+      : null;
+    oben.replaceChildren(platz?.element ?? "");
     textBereich.setzen();
     logoBereich.aktualisieren();
     zeigeErgebnis();
@@ -629,7 +1095,7 @@ async function editor(id) {
   }
 
   if (a.status === "arbeitet") {
-    formular.replaceChildren(el("h1", {}, istVideo ? "🎬 Video" : "🖼️ Sharepic"), el("p", { class: "leise" }, "Das Video wird vorbereitet – Spracherkennung und Gesichtssuche können auf dem Pi ein paar Minuten dauern."));
+    formular.replaceChildren(el("h1", {}, istVideo ? "🎬 Video" : "🖼️ Sharepic"), el("p", { class: "leise" }, "Das Video wird vorbereitet – Arbeitskopie zum Schneiden, Spracherkennung und Gesichtssuche können auf dem Pi ein paar Minuten dauern."));
     beobachten();
   } else {
     aufbauen();
@@ -643,7 +1109,12 @@ async function route() {
   abbruch = new AbortController();
   try {
     const m = location.hash.match(/^#\/a\/([0-9a-f]+)$/);
-    if (m) await editor(m[1]);
+    const ueber = location.hash.match(/^#\/uebernehmen\/([0-9a-f]+)\/([0-9a-f]+)$/);
+    if (ueber) {
+      const a = await anfrage("uebernehmen", { methode: "POST", json: { id: ueber[1], schluessel: ueber[2] } });
+      history.replaceState(null, "", `#/a/${a.id}`);
+      await editor(a.id);
+    } else if (m) await editor(m[1]);
     else if (location.hash === "#/meine") await meineSeite();
     else startseite();
   } catch (e) {

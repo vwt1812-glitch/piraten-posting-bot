@@ -70,6 +70,9 @@ export function hauptMenu(a, ctx) {
     if (ctx.kunden?.length) reihe.push(k(a, "kunde", "👤 Kunde"));
     knoepfe.push(reihe);
   }
+  if (ctx.webUrl && a.freigabe) {
+    knoepfe.push([{ text: a.art === "video" ? "✂️ Im Browser schneiden" : "🖥️ Im Browser bearbeiten", url: `${ctx.webUrl.replace(/\/$/, "")}/#/uebernehmen/${a.id}/${a.freigabe}` }]);
+  }
   knoepfe.push([k(a, "verwerfen", "🗑️ Verwerfen")]);
   return { text: zeilen.join("\n"), knoepfe };
 }

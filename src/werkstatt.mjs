@@ -9,9 +9,10 @@ import { chatStandard } from "./config.mjs";
 import { Auftraege } from "./auftraege.mjs";
 import { logoNachId, farbschema } from "./ppicng.mjs";
 import { sharepic, fotoMitLogo, eigenesBild } from "./grafik.mjs";
-import { untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren } from "./video.mjs";
+import { untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie } from "./video.mjs";
 import { transkribiere } from "./whisper.mjs";
-import { parseSrt, formatSrt, zuAss, volltext } from "./untertitel.mjs";
+import { parseSrt, formatSrt, zuAss, volltext, wendeKorrekturenAn } from "./untertitel.mjs";
+import { ganzerClip, schnittCues, cuesZurueck, schnittDauer, imClip } from "./schnitt.mjs";
 import { captionVorschlag } from "./caption.mjs";
 import { gesichtSuchen, lageFuer } from "./gesicht.mjs";
 import { Postiz, AnfragenZaehler, passendeKanaele, passtZu, findeKunde, kanaeleVonKunde, zeichenLimit, zeichenZahl } from "./postiz.mjs";
@@ -80,47 +81,172 @@ export class Werkstatt {
     return this.auftraege.aendern(a.id, felder);
   }
 
-  srtDatei(a) {
-    return path.join(a.ordner, "untertitel.srt");
+  // ---------- Clips, Schnitt, Untertitel ----------
+  // a.clips: [{id, name, datei, breite, hoehe, dauer, hatTon, gesichter, transkribiert, arbeitskopie}]
+  // a.schnitt: [{clip, von, bis}] – siehe schnitt.mjs. Aufträge von früher (nur a.quelle) gelten als ein Clip.
+
+  clips(a) {
+    if (a.clips) return a.clips;
+    return a.quelle ? [{ id: "c1", name: a.titel ?? "Video", ...a.quelle, gesichter: a.gesichter }] : [];
   }
 
-  /** Video ist da: untersuchen und merken. */
-  async videoAnnehmen(a, datei, notizen = "") {
-    const quelle = await untersuche(datei);
-    this.aendern(a, { quelle: { datei, ...quelle }, notizen });
+  schnitt(a) {
+    return a.schnitt ?? this.clips(a).map(ganzerClip);
   }
 
-  // ---------- Analyse ----------
+  clip(a, id) {
+    const c = this.clips(a).find((x) => x.id === id);
+    if (!c) throw new Error("Diesen Clip gibt es nicht.");
+    return c;
+  }
+
+  /** Maße fürs Zielformat „original“: der erste Clip im Schnitt. */
+  ersterClip(a) {
+    const schnitt = this.schnitt(a);
+    return this.clips(a).find((c) => c.id === schnitt[0]?.clip) ?? this.clips(a)[0];
+  }
+
+  #clipsSpeichern(a, clips, schnitt = this.schnitt(a)) {
+    const erster = clips.find((c) => c.id === schnitt[0]?.clip) ?? clips[0];
+    this.aendern(a, { clips, schnitt, quelle: erster ? { datei: erster.datei, breite: erster.breite, hoehe: erster.hoehe, dauer: schnittDauer(schnitt), hatTon: clips.some((c) => c.hatTon) } : null });
+  }
+
+  /** Neuer Clip (Datei liegt schon im Auftragsordner); hängt ihn ganz ans Ende des Schnitts. */
+  async clipHinzufuegen(a, datei, name = path.basename(datei)) {
+    const info = await untersuche(datei);
+    if (!(info.dauer > 0.2)) throw new Error("Das Video ist zu kurz oder lässt sich nicht lesen.");
+    const clips = [...this.clips(a)];
+    const bisher = clips.length ? this.schnitt(a) : [];
+    const id = `c${clips.reduce((n, c) => Math.max(n, Number(c.id.slice(1)) || 0), 0) + 1}`;
+    const clip = { id, name: String(name).slice(0, 80), datei, breite: info.breite, hoehe: info.hoehe, dauer: info.dauer, hatTon: info.hatTon };
+    clips.push(clip);
+    this.#clipsSpeichern(a, clips, [...bisher, ganzerClip(clip)]);
+    return clip;
+  }
+
+  clipEntfernen(a, id) {
+    const clips = this.clips(a).filter((c) => c.id !== id);
+    if (!clips.length) throw new Error("Der letzte Clip bleibt – sonst den ganzen Beitrag verwerfen.");
+    const schnitt = this.schnitt(a).filter((t) => t.clip !== id);
+    this.#clipsSpeichern(a, clips, schnitt.length ? schnitt : clips.map(ganzerClip));
+    this.cuesSchreiben(a, this.cues(a).filter((c) => c.clip !== id));
+  }
+
+  schnittSetzen(a, schnitt) {
+    this.#clipsSpeichern(a, this.clips(a), schnitt);
+    this.aendern(a, { transkript: volltext(this.ausgabeCues(a)), geaendert: true });
+  }
+
+  #clipAendern(a, id, felder) {
+    this.#clipsSpeichern(a, this.clips(a).map((c) => (c.id === id ? { ...c, ...felder } : c)));
+  }
+
+  untertitelDatei(a) {
+    return path.join(a.ordner, "untertitel.json");
+  }
+
+  /** Untertitel in Clip-Zeit: [{clip, start, end, text}] (ms). Frühere Aufträge hatten eine SRT. */
+  cues(a) {
+    try {
+      return JSON.parse(fs.readFileSync(this.untertitelDatei(a), "utf8"));
+    } catch {}
+    try {
+      return parseSrt(fs.readFileSync(path.join(a.ordner, "untertitel.srt"), "utf8")).map((c) => ({ clip: "c1", ...c }));
+    } catch {
+      return [];
+    }
+  }
+
+  cuesSchreiben(a, cues) {
+    fs.writeFileSync(this.untertitelDatei(a), JSON.stringify(cues));
+    const aus = schnittCues(cues, this.schnitt(a));
+    this.aendern(a, { hatUntertitel: aus.length > 0, transkript: volltext(aus) });
+  }
+
+  /** Untertitel im fertigen Schnitt. */
+  ausgabeCues(a) {
+    return schnittCues(this.cues(a), this.schnitt(a));
+  }
+
+  /** SRT des fertigen Schnitts (zum Herunterladen, für Plattformen mit eigenen Untertiteln). */
+  srtFuerAusgabe(a) {
+    const datei = path.join(a.ordner, "untertitel.srt");
+    fs.writeFileSync(datei, formatSrt(this.ausgabeCues(a)));
+    return datei;
+  }
+
+  /** Hochgeladene SRT (Zeiten im fertigen Schnitt) übernehmen. @returns Anzahl */
+  srtUebernehmen(a, text) {
+    const cues = cuesZurueck(parseSrt(text), this.schnitt(a));
+    // Untertitel der herausgeschnittenen Stellen bleiben, falls man den Schnitt wieder ändert
+    const sichtbar = new Set(this.ausgabeCues(a).map((c) => c.index));
+    const bleiben = this.cues(a).filter((_, i) => !sichtbar.has(i));
+    this.cuesSchreiben(a, [...bleiben, ...cues]);
+    return cues.length;
+  }
+
+  korrigieren(a, korrekturen) {
+    this.cuesSchreiben(a, wendeKorrekturenAn(this.cues(a), korrekturen));
+  }
+
+  /** Video ist da: als ersten Clip annehmen. */
+  async videoAnnehmen(a, datei, notizen = "", name) {
+    await this.clipHinzufuegen(a, datei, name);
+    this.aendern(a, { notizen });
+  }
+
+  // ---------- Analyse (je Clip, einmal) ----------
+
+  async #untertitelFuerClip(a, clip, schritt) {
+    if (!this.config.whisper || !clip.hatTon || clip.transkribiert) return;
+    await schritt(`🎙️ Spracherkennung${this.clips(a).length > 1 ? ` (${clip.name})` : ""} …`);
+    const wav = path.join(a.ordner, `ton-${clip.id}.wav`);
+    await tonFuerWhisper(clip.datei, wav);
+    const neu = await transkribiere(wav, this.config.whisper, this.config.glossar);
+    await fsp.rm(wav, { force: true });
+    this.cuesSchreiben(a, [...this.cues(a).filter((c) => c.clip !== clip.id), ...neu.map((c) => ({ clip: clip.id, ...c }))]);
+    this.#clipAendern(a, clip.id, { transkribiert: true });
+  }
 
   async untertitelErkennen(a, schritt = () => {}) {
-    if (!this.config.whisper || !a.quelle?.hatTon) return;
-    await schritt("🎙️ Spracherkennung läuft …");
-    const wav = path.join(a.ordner, "ton.wav");
-    await tonFuerWhisper(a.quelle.datei, wav);
-    const cues = await transkribiere(wav, this.config.whisper, this.config.glossar);
-    await fsp.rm(wav, { force: true });
-    await fsp.writeFile(this.srtDatei(a), formatSrt(cues));
-    this.aendern(a, { hatUntertitel: cues.length > 0, transkript: volltext(cues) });
+    for (const clip of this.clips(a)) await this.#untertitelFuerClip(a, clip, schritt);
   }
 
-  /** Gesichter im Original suchen (einmal je Video); die Lage wird beim Bauen fürs Zielformat bestimmt. */
+  /** Gesichter suchen (einmal je Clip); die Lage wird beim Bauen fürs Zielformat bestimmt. */
   async gesichterSuchen(a, schritt = () => {}) {
-    if (!this.gesichtAktiv || a.gesichter !== undefined) return;
-    await schritt("🙂 Suche Gesichter, damit die Untertitel sie nicht verdecken …");
-    this.aendern(a, { gesichter: await gesichtSuchen(a.quelle.datei, this.config.gesicht) });
+    if (!this.gesichtAktiv) return;
+    for (const clip of this.clips(a)) {
+      if (clip.gesichter !== undefined) continue;
+      await schritt("🙂 Suche Gesichter, damit die Untertitel sie nicht verdecken …");
+      this.#clipAendern(a, clip.id, { gesichter: await gesichtSuchen(clip.datei, this.config.gesicht) });
+    }
   }
 
-  /** Spracherkennung und Gesichtssuche; scheitert die Spracherkennung, geht es ohne Untertitel weiter. */
-  async analysieren(a, schritt = () => {}) {
+  /** Arbeitskopie (fürs Abspielen und Schneiden im Browser), Filmstreifen und Tonwelle je Clip. */
+  async arbeitskopienErstellen(a, schritt = () => {}) {
+    for (const clip of this.clips(a)) {
+      if (clip.arbeitskopie && fs.existsSync(clip.arbeitskopie.video)) continue;
+      await schritt(`🎞️ Bereite ${this.clips(a).length > 1 ? `„${clip.name}“` : "das Video"} zum Schneiden vor …`);
+      const ordner = path.join(a.ordner, "clips", clip.id);
+      await fsp.mkdir(ordner, { recursive: true });
+      this.#clipAendern(a, clip.id, { arbeitskopie: await arbeitskopie(clip, ordner) });
+    }
+  }
+
+  /** Spracherkennung und Gesichtssuche (im Browser auch Arbeitskopien); scheitert die Spracherkennung, geht es ohne Untertitel weiter. */
+  async analysieren(a, schritt = () => {}, { arbeitskopien = false } = {}) {
     const warnungen = [];
+    if (arbeitskopien) await this.arbeitskopienErstellen(a, schritt);
     if (a.e.untertitel) {
       try {
         await this.untertitelErkennen(a, schritt);
       } catch (e) {
         console.error(`Auftrag ${a.id}: Spracherkennung`, e);
-        a.e.untertitel = false;
-        this.aendern(a, { e: a.e });
-        warnungen.push(`Spracherkennung fehlgeschlagen, das Video kommt ohne Untertitel: ${e.message.slice(0, 400)}`);
+        warnungen.push(`Spracherkennung fehlgeschlagen, das Video kommt ohne automatische Untertitel: ${e.message.slice(0, 400)}`);
+        if (!this.cues(a).length) {
+          a.e.untertitel = false;
+          this.aendern(a, { e: a.e });
+        }
       }
     }
     await this.gesichterSuchen(a, schritt);
@@ -169,17 +295,24 @@ export class Werkstatt {
   /** Titelkarte oder Abspann eines Videos als PNG in dessen Zielformat. */
   async kartePng(a, art, e = a.e) {
     const { schema, logo } = this.#design(e);
-    const masse = zielMasse(e.format, a.quelle);
+    const masse = zielMasse(e.format, this.ersterClip(a));
     const k = art === "titelkarte" ? e.titelkarte : (e.abspann ?? { claim: e.abspannText });
     if (!k) return null;
     return k.bild ? eigenesBild({ ...masse, bild: k.bild, schema }) : sharepic({ ...masse, schema, claim: k.claim ?? "", text: k.text ?? "", logo });
   }
 
+  /** Teile für ffmpeg: Datei und Maße des Clips je Teil. */
+  #teile(a) {
+    const clips = new Map(this.clips(a).map((c) => [c.id, c]));
+    return this.schnitt(a).map((t) => ({ datei: clips.get(t.clip).datei, quelle: clips.get(t.clip), von: t.von, bis: t.bis }));
+  }
+
   /** Untertitel als ASS für das Zielformat, samt Lage (automatisch nach Gesicht oder gewählt). */
   async #untertitel(a, e, schema, masse, ordner) {
-    const lage = lageFuer({ e, funde: a.gesichter, quelle: a.quelle, masse });
-    if (!e.untertitel || !fs.existsSync(this.srtDatei(a))) return { ass: null, lage };
-    const cues = parseSrt(await fsp.readFile(this.srtDatei(a), "utf8"));
+    const benutzt = new Set(this.schnitt(a).map((t) => t.clip));
+    const quellen = this.clips(a).filter((c) => benutzt.has(c.id)).map((c) => ({ funde: c.gesichter, quelle: c }));
+    const lage = lageFuer({ e, quellen, masse });
+    const cues = e.untertitel ? this.ausgabeCues(a) : [];
     if (!cues.length) return { ass: null, lage };
     const ass = path.join(ordner, "untertitel.ass");
     const box = e.untertitelStil === "box";
@@ -207,12 +340,13 @@ export class Werkstatt {
       this.aendern(a, { ergebnis: datei, vorschauDatei: datei, masse, geaendert: false, status: "bereit", medium: null });
     } else {
       await schritt(`🎬 Baue das Video${this.wartend > 1 ? ` (in der Warteschlange: ${this.wartend - 1} vor dir)` : ""} …`);
-      if (a.e.untertitel && !fs.existsSync(this.srtDatei(a))) await this.untertitelErkennen(a, schritt);
-      const masse = zielMasse(a.e.format, a.quelle);
+      if (a.e.untertitel) await this.untertitelErkennen(a, schritt);
+      const masse = zielMasse(a.e.format, this.ersterClip(a));
       const { ass, lage } = await this.#untertitel(a, a.e, schema, masse, a.ordner);
       const ausgabe = path.join(a.ordner, "fertig.mp4");
+      await schritt(`🎬 Baue das Video (${Math.round(schnittDauer(this.schnitt(a)))} s) …`);
       const fertig = await rendern({
-        eingabe: a.quelle.datei, ausgabe, quelle: a.quelle, e: { ...a.e, untertitelLage: lage.lage }, schema, logo, ass,
+        teile: this.#teile(a), ausgabe, e: { ...a.e, untertitelLage: lage.lage }, schema, logo, ass,
         fontsDir: path.dirname(this.ppicng.schriften.fett), zeiten: this.config.zeiten, video: this.config.video,
       });
       await schritt("📦 Fast fertig …");
@@ -232,20 +366,24 @@ export class Werkstatt {
   }
 
   /**
-   * Ein Standbild des fertigen Videos mit den Einstellungen `e` (ohne Titelkarte und Abspann) – schnell genug
-   * für die Vorschau in der Web-Version. Gehört in die Warteschlange.
+   * Ein Standbild des fertigen Videos mit den Einstellungen `e` (ohne Titelkarte und Abspann) – an der Stelle
+   * `zeit` des Schnitts oder dort, wo die Bauchbinde ganz zu sehen ist. Gehört in die Warteschlange.
    */
-  async standbild(a, e = a.e) {
+  async standbild(a, e = a.e, zeit = null) {
     const { schema, logo } = this.#design(e);
     const ordner = path.join(a.ordner, "standbild");
     await fsp.mkdir(ordner, { recursive: true });
-    const masse = zielMasse(e.format, a.quelle);
+    const masse = zielMasse(e.format, this.ersterClip(a));
     const { ass, lage } = await this.#untertitel(a, e, schema, masse, ordner);
-    // Zeitpunkt, an dem die Bauchbinde ganz zu sehen ist und meist schon Untertitel laufen
-    const sekunde = Math.min(Math.max(0, a.quelle.dauer - 0.1), this.config.zeiten.bauchbindeStart + 1.2);
+    const dauer = schnittDauer(this.schnitt(a));
+    const sekunde = Math.min(Math.max(0, dauer - 0.1), Math.max(0, zeit ?? this.config.zeiten.bauchbindeStart + 1.2));
+    // Nur die Teile bis zur gewünschten Stelle dekodieren
+    const teile = this.#teile(a);
+    const ort = imClip(this.schnitt(a), sekunde);
+    const bis = teile.slice(0, (ort?.index ?? 0) + 1);
     const ausgabe = path.join(ordner, "standbild.jpg");
     const { args } = await renderArgs({
-      eingabe: a.quelle.datei, ausgabe, quelle: a.quelle, e: { ...e, titelkarte: null, abspannAn: false, untertitelLage: lage.lage },
+      teile: bis, ausgabe, e: { ...e, titelkarte: null, abspannAn: false, untertitelLage: lage.lage },
       schema, logo, ass, fontsDir: path.dirname(this.ppicng.schriften.fett), zeiten: this.config.zeiten, video: this.config.video,
       standbild: sekunde,
     });

@@ -68,17 +68,63 @@ export function zielMasse(format, masse) {
 
 /**
  * Filter vom Originalbild auf die Zielfläche. „rand“: ganzes Bild, Rest mit unscharfer Kopie aufgefüllt;
- * „zuschneiden“: Fläche füllen, Überstand mittig abschneiden.
+ * „zuschneiden“: Fläche füllen, Überstand mittig abschneiden. `kennung` macht die inneren Labels eindeutig,
+ * wenn mehrere Teile in einem Filtergraphen stehen.
  */
-export function flaecheFilter(quelle, ziel, anpassen = "rand") {
+export function flaecheFilter(quelle, ziel, anpassen = "rand", kennung = "") {
   const { breite: w, hoehe: h } = ziel;
   const gleich = Math.abs(quelle.breite / quelle.hoehe - w / h) < 0.01;
   if (gleich) return `scale=${w}:${h},setsar=1`;
   if (anpassen === "zuschneiden") return `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1`;
-  return `split[fgrund][fbild];` +
-    `[fgrund]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=40:2,eq=saturation=0.85[funscharf];` +
-    `[fbild]scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2[fvorne];` +
-    `[funscharf][fvorne]overlay=(W-w)/2:(H-h)/2,setsar=1`;
+  const l = (n) => `[f${n}${kennung}]`;
+  return `split${l("grund")}${l("bild")};` +
+    `${l("grund")}scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=40:2,eq=saturation=0.85${l("unscharf")};` +
+    `${l("bild")}scale=${w}:${h}:force_original_aspect_ratio=decrease:force_divisible_by=2${l("vorne")};` +
+    `${l("unscharf")}${l("vorne")}overlay=(W-w)/2:(H-h)/2,setsar=1`;
+}
+
+/**
+ * Schnitt im Filtergraphen: jedes Teil aus seinem Clip herausschneiden, auf die Zielfläche setzen und alle
+ * aneinanderhängen – in einem Durchgang mit dem Rest, damit der Pi nur einmal encodieren muss.
+ * @param {{datei:string, quelle:{breite:number,hoehe:number,hatTon:boolean}, von:number, bis:number}[]} teile
+ * @returns {{eingaben:string[], filter:string[], video:string, ton:string|null}}
+ */
+export function schnittFilter(teile, masse, anpassen, { mitTon = true } = {}) {
+  const eingaben = [...new Set(teile.map((t) => t.datei))];
+  const filter = [];
+  // Jeder Eingang darf im Graphen nur einmal vorkommen – bei mehreren Teilen aus einem Clip aufteilen
+  const quellen = new Map();
+  eingaben.forEach((datei, i) => {
+    const anzahl = teile.filter((t) => t.datei === datei).length;
+    const hatTon = teile.find((t) => t.datei === datei).quelle.hatTon;
+    const v = Array.from({ length: anzahl }, (_, k) => `[e${i}v${k}]`);
+    const a = Array.from({ length: anzahl }, (_, k) => `[e${i}a${k}]`);
+    if (anzahl > 1) filter.push(`[${i}:v]split=${anzahl}${v.join("")}`);
+    if (anzahl > 1 && mitTon && hatTon) filter.push(`[${i}:a]asplit=${anzahl}${a.join("")}`);
+    quellen.set(datei, { v: anzahl > 1 ? v : [`[${i}:v]`], a: anzahl > 1 ? a : [`[${i}:a]`], naechste: 0 });
+  });
+  const paare = [];
+  teile.forEach((t, k) => {
+    const q = quellen.get(t.datei);
+    const n = q.naechste++;
+    const von = t.von.toFixed(3);
+    const bis = t.bis.toFixed(3);
+    filter.push(`${q.v[n]}setpts=PTS-STARTPTS,trim=start=${von}:end=${bis},setpts=PTS-STARTPTS,` +
+      `${flaecheFilter(t.quelle, masse, anpassen, `t${k}`)},fps=30,format=yuv420p[tv${k}]`);
+    if (mitTon) {
+      filter.push(t.quelle.hatTon
+        ? `${q.a[n]}asetpts=PTS-STARTPTS,atrim=start=${von}:end=${bis},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[ta${k}]`
+        : `anullsrc=r=48000:cl=stereo,atrim=0:${(t.bis - t.von).toFixed(3)}[ta${k}]`);
+    }
+    paare.push(mitTon ? `[tv${k}][ta${k}]` : `[tv${k}]`);
+  });
+  if (teile.length > 1) {
+    filter.push(`${paare.join("")}concat=n=${teile.length}:v=1:a=${mitTon ? 1 : 0}[flaeche]${mitTon ? "[ton]" : ""}`);
+  } else {
+    filter.push("[tv0]null[flaeche]");
+    if (mitTon) filter.push("[ta0]anull[ton]");
+  }
+  return { eingaben, filter, video: "flaeche", ton: mitTon ? "ton" : null };
 }
 
 // ---------- Lage der Grafiken ----------
@@ -108,25 +154,30 @@ export function bauchbindeLage({ masse, grafik, untertitel, lage }) {
 /**
  * Grafiken für ein Video erzeugen und die ffmpeg-Argumente bauen.
  * @param {object} o
- * @param {string} o.eingabe Originalvideo
+ * @param {{datei:string, quelle:object, von:number, bis:number}[]} [o.teile] Schnitt (sonst o.eingabe ganz)
+ * @param {string} [o.eingabe] Originalvideo, wenn nicht geschnitten wird
+ * @param {{breite:number,hoehe:number,dauer:number,hatTon:boolean}} [o.quelle] Maße des Originals
  * @param {string} o.ausgabe fertiges MP4
- * @param {{breite:number,hoehe:number,dauer:number,hatTon:boolean}} o.quelle Maße des Originals
  * @param {object} o.e Einstellungen des Beitrags (format, anpassen, logoStil, …)
  * @param {object} o.schema Farbschema
  * @param {object|null} o.logo ppicng-Logo
- * @param {string|null} o.ass ASS-Datei im Ausgabeordner oder null
+ * @param {string|null} o.ass ASS-Datei im Ausgabeordner oder null (Zeiten im fertigen Schnitt)
  * @param {string} o.fontsDir Ordner mit DejaRip für die Untertitel
  * @param {object} o.zeiten config.zeiten
  * @param {object} o.video config.video
  * @param {number} [o.standbild] statt des Videos nur ein JPEG dieser Sekunde (ohne Titelkarte, Abspann, Ton)
  */
-export async function renderArgs({ eingabe, ausgabe, quelle, e, schema, logo, ass, fontsDir, zeiten, video, standbild }) {
+export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, logo, ass, fontsDir, zeiten, video, standbild }) {
+  teile ??= [{ datei: eingabe, quelle, von: 0, bis: Math.max(0.1, quelle.dauer) }];
   const ordner = path.dirname(ausgabe);
-  const masse = zielMasse(e.format, quelle);
-  const dauer = Math.max(0.1, quelle.dauer);
-  const args = ["-y", "-v", "error", "-i", eingabe];
-  const filter = [];
-  let eingang = 1;
+  const masse = zielMasse(e.format, teile[0].quelle);
+  const dauer = Math.max(0.1, teile.reduce((s, t) => s + t.bis - t.von, 0));
+  const mitTon = standbild === undefined;
+  const schnitt = schnittFilter(teile, masse, e.anpassen, { mitTon });
+  const args = ["-y", "-v", "error"];
+  for (const d of schnitt.eingaben) args.push("-i", d);
+  const filter = [...schnitt.filter];
+  let eingang = schnitt.eingaben.length;
   const bild = async (name, png, loop = null) => {
     const datei = path.join(ordner, name);
     await fs.writeFile(datei, png);
@@ -134,9 +185,7 @@ export async function renderArgs({ eingabe, ausgabe, quelle, e, schema, logo, as
     else args.push("-i", datei);
     return eingang++;
   };
-
-  filter.push(`[0:v]${flaecheFilter(quelle, masse, e.anpassen)},fps=30[flaeche]`);
-  let letzte = "flaeche";
+  let letzte = schnitt.video;
 
   if (ass) {
     filter.push(`[${letzte}]ass=${path.basename(ass)}:fontsdir=${fontsDir.replace(/[\\:']/g, "\\$&")}[sub]`);
@@ -187,9 +236,6 @@ export async function renderArgs({ eingabe, ausgabe, quelle, e, schema, logo, as
   }
 
   filter.push(`[${letzte}]format=yuv420p[haupt]`);
-  filter.push(quelle.hatTon
-    ? `[0:a]aresample=48000,aformat=channel_layouts=stereo[ton]`
-    : `anullsrc=r=48000:cl=stereo,atrim=0:${dauer}[ton]`);
   if (vorne || hinten) {
     const teile = [vorne, "haupt", hinten].filter(Boolean);
     const paare = teile.map((t) => (t === "haupt" ? "[haupt][ton]" : `[${t}v][${t}a]`)).join("");
@@ -219,6 +265,36 @@ export async function vorschau(eingabe, ausgabe) {
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart", ausgabe,
   ]);
+}
+
+/**
+ * Für das Schneiden im Browser: eine kleine Arbeitskopie (H.264, die jeder Browser abspielt, alle 0,4 s ein
+ * Keyframe zum genauen Springen), ein Filmstreifen (Bilder nebeneinander) und die Tonwelle.
+ * @returns {Promise<{video:string, streifen:string, bilder:number, welle:string|null}>}
+ */
+export async function arbeitskopie(clip, ordner) {
+  const video = path.join(ordner, "arbeitskopie.mp4");
+  const streifen = path.join(ordner, "streifen.jpg");
+  const welle = path.join(ordner, "welle.png");
+  const hochkant = clip.hoehe > clip.breite;
+  await ausfuehren("ffmpeg", [
+    "-y", "-v", "error", "-i", clip.datei,
+    "-vf", `scale=${hochkant ? "-2:854" : "854:-2"}`, "-r", "25", "-g", "10", "-keyint_min", "10",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
+    "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-movflags", "+faststart", video,
+  ]);
+  const bilder = Math.max(6, Math.min(80, Math.round(clip.dauer / 1.5)));
+  await ausfuehren("ffmpeg", [
+    "-y", "-v", "error", "-i", video,
+    "-vf", `fps=${(bilder / clip.dauer).toFixed(5)},scale=-2:72,tile=${bilder}x1`, "-frames:v", "1", "-q:v", "5", streifen,
+  ]);
+  if (clip.hatTon) {
+    await ausfuehren("ffmpeg", [
+      "-y", "-v", "error", "-i", video,
+      "-filter_complex", "aformat=channel_layouts=mono,showwavespic=s=1600x80:colors=0xff8800:scale=sqrt", "-frames:v", "1", welle,
+    ]);
+  }
+  return { video, streifen, bilder, welle: clip.hatTon ? welle : null };
 }
 
 /** Standbild für Matrix-Vorschaubilder und die KI. */
