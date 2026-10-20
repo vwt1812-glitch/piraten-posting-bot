@@ -9,7 +9,7 @@ import { chatStandard } from "./config.mjs";
 import { Auftraege } from "./auftraege.mjs";
 import { logoNachId, farbschema } from "./ppicng.mjs";
 import { sharepic, fotoMitLogo, eigenesBild } from "./grafik.mjs";
-import { untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie } from "./video.mjs";
+import { tonUntersuchen, untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie } from "./video.mjs";
 import { transkribiere } from "./whisper.mjs";
 import { parseSrt, formatSrt, zuAss, volltext, wendeKorrekturenAn } from "./untertitel.mjs";
 import { ganzerClip, schnittCues, cuesZurueck, schnittDauer, imClip } from "./schnitt.mjs";
@@ -66,6 +66,8 @@ export class Werkstatt {
         abspann: null,
         abspannText: std.abspannText,
         sharepicFormat: std.sharepicFormat,
+        // Ton: Lautheit angleichen (für Social Media), Rauschminderung, Hintergrundmusik
+        ton: { angleichen: std.tonAngleichen, rauschen: std.tonRauschen, musik: null },
         claim: "",
         text: "",
         bild: null,
@@ -107,6 +109,11 @@ export class Werkstatt {
   }
 
   #clipsSpeichern(a, clips, schnitt = this.schnitt(a)) {
+    // Der erste Teil hat keinen Vorgänger, also keinen Übergang (z. B. nachdem ein Clip gelöscht wurde)
+    if (schnitt[0]?.uebergang) {
+      const { uebergang, ...erster } = schnitt[0];
+      schnitt = [erster, ...schnitt.slice(1)];
+    }
     const erster = clips.find((c) => c.id === schnitt[0]?.clip) ?? clips[0];
     this.aendern(a, { clips, schnitt, quelle: erster ? { datei: erster.datei, breite: erster.breite, hoehe: erster.hoehe, dauer: schnittDauer(schnitt), hatTon: clips.some((c) => c.hatTon) } : null });
   }
@@ -187,6 +194,15 @@ export class Werkstatt {
 
   korrigieren(a, korrekturen) {
     this.cuesSchreiben(a, wendeKorrekturenAn(this.cues(a), korrekturen));
+  }
+
+  /** Hintergrundmusik setzen (Datei liegt schon im Auftragsordner und ist geprüft). */
+  async musikSetzen(a, datei, name) {
+    const { dauer } = await tonUntersuchen(datei);
+    const alt = a.e.ton?.musik;
+    const ton = { ...(a.e.ton ?? {}), musik: { datei, name: String(name).slice(0, 80), dauer, lautstaerke: alt?.lautstaerke ?? 0.25, ducking: alt?.ducking ?? true, ab: 0 } };
+    this.aendern(a, { e: { ...a.e, ton }, geaendert: true });
+    if (alt?.datei && alt.datei !== datei) await fsp.rm(alt.datei, { force: true });
   }
 
   /** Video ist da: als ersten Clip annehmen. */
@@ -304,7 +320,8 @@ export class Werkstatt {
   /** Teile für ffmpeg: Datei und Maße des Clips je Teil. */
   #teile(a) {
     const clips = new Map(this.clips(a).map((c) => [c.id, c]));
-    return this.schnitt(a).map((t) => ({ datei: clips.get(t.clip).datei, quelle: clips.get(t.clip), von: t.von, bis: t.bis }));
+    // Alles vom Teil mitnehmen: Lautstärke, stumm, Übergang
+    return this.schnitt(a).map((t) => ({ ...t, datei: clips.get(t.clip).datei, quelle: clips.get(t.clip) }));
   }
 
   /** Untertitel als ASS für das Zielformat, samt Lage (automatisch nach Gesicht oder gewählt). */

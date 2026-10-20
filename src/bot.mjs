@@ -10,7 +10,7 @@ import { TelegramPlattform } from "./plattform/telegram.mjs";
 import { MatrixPlattform } from "./plattform/matrix.mjs";
 import { ladePpicng, sucheLogos } from "./ppicng.mjs";
 import { schriftenAnmelden } from "./grafik.mjs";
-import { ausfuehren, fotoNormalisieren } from "./video.mjs";
+import { ausfuehren, fotoNormalisieren, sichereEndung } from "./video.mjs";
 import { parseKorrekturen, parseBauchbinde } from "./untertitel.mjs";
 import { kuerzen } from "./caption.mjs";
 import { kundenAus, zeichenLimit, zeichenZahl } from "./postiz.mjs";
@@ -110,7 +110,7 @@ async function videoEmpfangen(ereignis) {
   const a = neuerAuftrag(ereignis, "video");
   await status(a, `⏳ Video angekommen – ich lade es${schlangenHinweis()} …`);
   try {
-    const original = path.join(a.ordner, `original${path.extname(ereignis.medium.name) || ".mp4"}`);
+    const original = path.join(a.ordner, `original${sichereEndung(ereignis.medium.name, "video")}`);
     await p.herunterladen(ereignis.medium, original);
     await werkstatt.videoAnnehmen(a, original, ereignis.text);
     await arbeit(async () => {
@@ -128,7 +128,7 @@ async function videoEmpfangen(ereignis) {
 
 async function fotoEmpfangen(ereignis, fuer = null) {
   const p = plattformen[ereignis.plattform];
-  const roh = path.join(config.datenDir, `eingang-${Date.now()}${path.extname(ereignis.medium.name) || ".jpg"}`);
+  const roh = path.join(config.datenDir, `eingang-${Date.now()}${sichereEndung(ereignis.medium.name, "bild")}`);
   await p.herunterladen(ereignis.medium, roh);
   if (fuer) {
     // Bild für Titelkarte, Abspann oder ein bestehendes Sharepic
@@ -317,6 +317,30 @@ async function knopf(ereignis) {
     case "korrektur":
       return warte("korrektur", "✏️ Schick mir Korrekturen, eine pro Zeile: <code>falsch => richtig</code> – oder eine <code>.srt</code>-Datei.");
 
+    case "ton":
+      return menuZeigen(a, M.tonMenu(a));
+    case "ta":
+    case "tr":
+    case "tm":
+    case "td":
+    case "tx": {
+      const ton = { angleichen: true, rauschen: false, musik: null, ...(e.ton ?? {}) };
+      if (aktion === "ta") ton.angleichen = ton.angleichen === false;
+      if (aktion === "tr") ton.rauschen = !ton.rauschen;
+      if (aktion === "tx") ton.musik = null;
+      if (aktion === "td" && ton.musik) ton.musik = { ...ton.musik, ducking: ton.musik.ducking === false };
+      if (aktion === "tm" && ton.musik) {
+        const stufen = M.MUSIK_STUFEN.map(([, l]) => l);
+        const jetzt = stufen.findIndex((l) => l >= (ton.musik.lautstaerke ?? 0.25) - 0.001);
+        ton.musik = { ...ton.musik, lautstaerke: stufen[(jetzt + 1) % stufen.length] };
+      }
+      Object.assign(e, { ton });
+      auftraege.aendern(a.id, { e, geaendert: true });
+      return menuZeigen(a, M.tonMenu(a));
+    }
+    case "tmusik":
+      return warte("musik", "🎵 Schick mir die Musik als Audiodatei (MP3, M4A, OGG, WAV …). Nur Musik verwenden, die ihr nutzen dürft!", [[{ text: "⬅️ Zurück", daten: `${a.id}:ton` }]]);
+
     case "bauchbinde":
       return menuZeigen(a, M.bauchbindeMenu(a, ctx));
     case "bb":
@@ -445,6 +469,18 @@ async function eingabe(a, ereignis) {
     if (["titelkarte-bild", "abspann-bild"].includes(a.wartetAuf) && m.art === "foto") {
       const bild = await fotoEmpfangen(ereignis, { a, zweck: a.wartetAuf });
       return gestaltet(a.wartetAuf === "titelkarte-bild" ? { titelkarte: { bild } } : { abspannAn: true, abspann: { bild } });
+    }
+    if (a.wartetAuf === "musik" && m.art === "ton") {
+      const datei = path.join(a.ordner, `musik-${Date.now()}${sichereEndung(m.name, "ton")}`);
+      await p.herunterladen(m, datei);
+      try {
+        await werkstatt.musikSetzen(a, datei, m.name);
+      } catch (err) {
+        await fsp.rm(datei, { force: true });
+        return p.senden(a.chat, `Die Musik ließ sich nicht lesen: ${html(err.message.split("\n")[0])}`);
+      }
+      auftraege.aendern(a.id, { wartetAuf: null, geaendert: true });
+      return menuZeigen(a, M.tonMenu(a), { neu: true });
     }
     if (a.wartetAuf === "korrektur" && /\.srt$/i.test(m.name)) {
       const ziel = path.join(a.ordner, "neu.srt");
@@ -598,6 +634,7 @@ async function verarbeiten(ereignis) {
     if (ereignis.typ === "medium") {
       if (ereignis.medium.art === "video") return await videoEmpfangen(ereignis);
       if (ereignis.medium.art === "foto") return await fotoEmpfangen(ereignis);
+      if (ereignis.medium.art === "ton") return await p.senden(ereignis.chat, "🎵 Musik? Erst das Video schicken, dann unter 🎨 Gestaltung → 🔊 Ton „Musik schicken“.");
       return await p.senden(ereignis.chat, "Mit dieser Datei kann ich nichts anfangen – schick ein Video oder ein Foto.");
     }
     // Freier Text im Einzelchat wird ein Sharepic; in Gruppen und Räumen nur mit /sharepic bzw. !sharepic

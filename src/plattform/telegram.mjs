@@ -38,10 +38,14 @@ export function ereignisAus(update) {
   else if (m.photo?.length) {
     const f = m.photo.at(-1);
     medium = { art: "foto", ref: f.file_id, name: "foto.jpg", groesse: f.file_size };
+  } else if (m.audio) {
+    medium = { art: "ton", ref: m.audio.file_id, name: m.audio.file_name ?? "musik.mp3", groesse: m.audio.file_size, mime: m.audio.mime_type };
+  } else if (m.voice) {
+    medium = { art: "ton", ref: m.voice.file_id, name: "sprache.ogg", groesse: m.voice.file_size, mime: m.voice.mime_type };
   } else if (m.document) {
     const d = m.document;
     const mime = d.mime_type ?? "";
-    const art = mime.startsWith("video/") ? "video" : mime.startsWith("image/") ? "foto" : "datei";
+    const art = mime.startsWith("video/") ? "video" : mime.startsWith("image/") ? "foto" : mime.startsWith("audio/") ? "ton" : "datei";
     medium = { art, ref: d.file_id, name: d.file_name ?? "datei", groesse: d.file_size, mime };
   }
   const text = (m.text ?? m.caption ?? "").trim();

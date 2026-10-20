@@ -1,11 +1,16 @@
 // Web-Version: dieselbe Werkstatt wie der Bot, bedienbar im Browser – wie ppicng, aber auch für Videos.
 // Kein Framework, nur node:http. Die Seite selbst liegt in web/ (HTML, CSS, JS ohne Build-Schritt).
 //
-// Anmeldung (mindestens eins davon, sonst startet die Web-Version nicht – außer mit WEB_OFFEN=ja):
-//   • WEB_PASSWORT: ein gemeinsames Passwort fürs Team
-//   • WEB_MATRIX_ANMELDUNG=ja: mit dem eigenen Matrix-Konto (z. B. von matrix.piratenpartei.de), erlaubt
-//     sind die Konten aus WEB_ERLAUBT (z. B. *:piratenpartei.de). Das Passwort geht nur einmal zum
-//     Matrix-Server; der dabei entstandene Zugang wird sofort wieder abgemeldet.
+// Zwei Modi:
+//   • offen (kein Postiz, keine Anmeldung eingestellt): Jeder Browser bekommt eine Gast-Sitzung und sieht nur
+//     seine eigenen Projekte. Grenzen gegen Missbrauch: Uploads je Adresse und Stunde, Länge, Speicher,
+//     offene Projekte, gleichzeitige Aufträge.
+//   • Anmeldung (Pflicht, sobald Postiz eingerichtet ist): Team-Passwort (WEB_PASSWORT) und/oder das eigene
+//     Matrix-Konto (WEB_MATRIX_ANMELDUNG, erlaubt sind die Konten aus WEB_ERLAUBT). Das Matrix-Passwort geht
+//     nur einmal zum Matrix-Server; der dabei entstandene Zugang wird sofort wieder abgemeldet.
+// Sitzungen liegen auf dem Server (websicherheit.mjs), Cookies sind HttpOnly, SameSite=Strict und – mit
+// https-WEB_URL – Secure mit __Host-Präfix. Schreibende Anfragen brauchen den Kopf X-PPB und, wenn der Browser
+// einen Origin mitschickt, denselben Host.
 
 import http from "node:http";
 import fs from "node:fs";
@@ -15,14 +20,16 @@ import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { FARBSCHEMATA, logoNachId, logoDatei } from "./ppicng.mjs";
-import { FORMATE, fotoNormalisieren } from "./video.mjs";
+import { FORMATE, fotoNormalisieren, sichereEndung, tonUntersuchen } from "./video.mjs";
 import { formatSrt } from "./untertitel.mjs";
-import { schnittPruefen, cuesPruefen, schnittDauer } from "./schnitt.mjs";
+import { schnittPruefen, cuesPruefen, schnittDauer, UEBERGAENGE } from "./schnitt.mjs";
 import { kuerzen } from "./caption.mjs";
 import { kundenAus, zeichenLimit, zeichenZahl } from "./postiz.mjs";
 import { istErlaubt } from "./plattform/matrix.mjs";
 import { SHAREPIC_FORMATE, BILDSTILE, LAGEN } from "./menues.mjs";
 import { zeitText } from "./zeit.mjs";
+import { Sitzungen, Begrenzer, clientAdresse, ordnerGroesse, groesseVergessen, protokollierer, passwortMerkmal } from "./websicherheit.mjs";
+import { untersuche } from "./video.mjs";
 
 const WEB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
 const MB = 1024 * 1024;
@@ -33,7 +40,11 @@ const STATISCH = {
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/stil.css": ["stil.css", "text/css; charset=utf-8"],
 };
-const TYPEN = { ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".mp4": "video/mp4", ".otf": "font/otf", ".srt": "application/x-subrip" };
+const TYPEN = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".mp4": "video/mp4", ".otf": "font/otf", ".srt": "application/x-subrip",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac",
+  ".m4a": "audio/mp4", ".aac": "audio/aac", ".mka": "audio/x-matroska",
+};
 const VIDEO_ENDUNG = /\.(mp4|mov|m4v|webm|mkv|avi|3gp|mts)$/i;
 
 export class HttpFehler extends Error {
@@ -41,28 +52,6 @@ export class HttpFehler extends Error {
     super(text);
     this.status = status;
     this.daten = daten;
-  }
-}
-
-// ---------- Sitzungen: signiertes Cookie, nichts auf dem Server ----------
-
-export function sitzungErstellen(geheimnis, nutzer, jetzt = Date.now()) {
-  const inhalt = Buffer.from(JSON.stringify({ n: nutzer, b: jetzt + SITZUNG_TAGE * 864e5 })).toString("base64url");
-  const sig = crypto.createHmac("sha256", geheimnis).update(inhalt).digest("base64url");
-  return `${inhalt}.${sig}`;
-}
-
-export function sitzungLesen(geheimnis, wert, jetzt = Date.now()) {
-  const [inhalt, sig] = String(wert ?? "").split(".");
-  if (!inhalt || !sig) return null;
-  const soll = crypto.createHmac("sha256", geheimnis).update(inhalt).digest();
-  const ist = Buffer.from(sig, "base64url");
-  if (ist.length !== soll.length || !crypto.timingSafeEqual(ist, soll)) return null;
-  try {
-    const { n, b } = JSON.parse(Buffer.from(inhalt, "base64url").toString());
-    return b > jetzt ? n : null;
-  } catch {
-    return null;
   }
 }
 
@@ -128,6 +117,21 @@ export function bereinigen(neu, alt, ppicng) {
     if (k.art === "bild") return bisher?.bild ? { bild: bisher.bild } : null;
     return { claim: textFeld(k.claim, 300), text: textFeld(k.text, 800) };
   };
+  if (neu.ton && typeof neu.ton === "object") {
+    const altTon = alt.ton ?? {};
+    const zahl = (wert, min, max, standard) => (Number.isFinite(Number(wert)) ? Math.max(min, Math.min(max, Number(wert))) : standard);
+    e.ton = { angleichen: jaNein(neu.ton.angleichen, altTon.angleichen ?? true), rauschen: jaNein(neu.ton.rauschen, altTon.rauschen ?? false), musik: altTon.musik ?? null };
+    // Musikdatei bleibt die vom Server; aus dem Browser nur Lautstärke, Ducking, Startpunkt – oder entfernen
+    if (neu.ton.musik === null) e.ton.musik = null;
+    else if (e.ton.musik && neu.ton.musik && typeof neu.ton.musik === "object") {
+      e.ton.musik = {
+        ...e.ton.musik,
+        lautstaerke: zahl(neu.ton.musik.lautstaerke, 0, 1, e.ton.musik.lautstaerke),
+        ducking: jaNein(neu.ton.musik.ducking, e.ton.musik.ducking),
+        ab: zahl(neu.ton.musik.ab, 0, Math.max(0, (e.ton.musik.dauer ?? 1) - 1), e.ton.musik.ab),
+      };
+    }
+  }
   if ("titelkarte" in neu) e.titelkarte = karte(neu.titelkarte, alt.titelkarte);
   if ("abspann" in neu) e.abspann = karte(neu.abspann, alt.abspann);
   return e;
@@ -148,7 +152,10 @@ export function ansicht(a, werkstatt) {
     fehler: a.fehler ?? "",
     warnungen: a.warnungen ?? [],
     erstellt: a.erstellt,
-    e: { ...a.e, bild: Boolean(a.e.bild), titelkarte: karte(a.e.titelkarte), abspann: karte(a.e.abspann) },
+    e: {
+      ...a.e, bild: Boolean(a.e.bild), titelkarte: karte(a.e.titelkarte), abspann: karte(a.e.abspann),
+      ton: { angleichen: true, rauschen: false, ...(a.e.ton ?? {}), musik: a.e.ton?.musik ? { ...a.e.ton.musik, datei: undefined } : null },
+    },
     quelle: erster ? { breite: erster.breite, hoehe: erster.hoehe, dauer: schnittDauer(schnitt), hatTon: clips.some((c) => c.hatTon) } : null,
     clips: clips.map((c) => ({
       id: c.id, name: c.name, breite: c.breite, hoehe: c.hoehe, dauer: c.dauer, hatTon: c.hatTon,
@@ -178,15 +185,62 @@ export function ansicht(a, werkstatt) {
 export async function starteWeb({ config, werkstatt }) {
   const w = config.web;
   const { ppicng, auftraege } = werkstatt;
+  fs.mkdirSync(config.datenDir, { recursive: true });
   const geheimnisDatei = path.join(config.datenDir, "web-geheimnis");
-  let geheimnis = w.geheimnis;
-  if (!geheimnis) {
-    if (!fs.existsSync(geheimnisDatei)) fs.writeFileSync(geheimnisDatei, crypto.randomBytes(32).toString("hex"), { mode: 0o600 });
-    geheimnis = fs.readFileSync(geheimnisDatei, "utf8").trim();
-  }
-  const versuche = new Map(); // IP → Zeitpunkte fehlgeschlagener Anmeldungen
+  if (!fs.existsSync(geheimnisDatei)) fs.writeFileSync(geheimnisDatei, crypto.randomBytes(32).toString("hex"), { mode: 0o600 });
+  const geheimnis = fs.readFileSync(geheimnisDatei, "utf8").trim();
+  const sitzungen = new Sitzungen(path.join(config.datenDir, "web-sitzungen.json"));
+  setInterval(() => sitzungen.aufraeumen(), 3600e3).unref();
+  const protokoll = protokollierer(path.join(config.datenDir, "web-protokoll.log"));
+  const grenzen = {
+    anmeldungAdresse: new Begrenzer(10, 15 * 60e3), // Fehlversuche je Adresse
+    anmeldungName: new Begrenzer(20, 3600e3), // Fehlversuche je Name (gegen verteiltes Raten)
+    gaeste: new Begrenzer(30, 3600e3), // neue Gast-Sitzungen je Adresse
+    uploads: new Begrenzer(w.uploadsProStunde, 3600e3),
+  };
+  // Mit https-Adresse: Cookie nur über https und fest an diesen Host gebunden
+  const sicher = w.url.startsWith("https://");
+  const COOKIE = sicher ? "__Host-ppb" : "ppb";
+  const cookieSetzen = (wert, tage) => `${COOKIE}=${wert}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.round(tage * 86400)}${sicher ? "; Secure" : ""}`;
+  if (!w.anmeldung) console.log("web: offen ohne Anmeldung (kein Postiz) – Projekte gehören dem jeweiligen Browser");
 
-  const darfPosten = (nutzer) => Boolean(werkstatt.postiz) && (w.posten === true || (Array.isArray(w.posten) && istErlaubt(w.posten, nutzer, "")));
+  /** Sitzung aus dem Cookie – nur, solange sie zur aktuellen Einstellung passt. */
+  function nutzerAus(req) {
+    const s = sitzungen.lesen(cookies(req)[COOKIE]);
+    if (!s) return null;
+    if (s.art === "passwort") return w.passwort && s.merkmal === passwortMerkmal(geheimnis, w.passwort) ? s.nutzer : null;
+    if (s.art === "matrix") return w.matrixAnmeldung && istErlaubt(w.erlaubt, s.nutzer, "") ? s.nutzer : null;
+    if (s.art === "gast") return w.anmeldung ? null : s.nutzer;
+    return null;
+  }
+
+  const darfPosten = (nutzer) => Boolean(werkstatt.postiz) && w.anmeldung && !String(nutzer).startsWith("gast:") &&
+    (w.posten === true || (Array.isArray(w.posten) && istErlaubt(w.posten, nutzer, "")));
+
+  const offen = (nutzer) => Object.values(auftraege.alle).filter((a) => a.plattform === "web" && a.chat === nutzer);
+
+  /** Grenzen vor jedem Upload und neuen Projekt. */
+  function grenzenPruefen(nutzer, ip, { neuesProjekt = false, upload = false } = {}) {
+    if (upload && !grenzen.uploads.erlauben(ip)) throw new HttpFehler(429, "Zu viele Uploads in der letzten Stunde – bitte später nochmal.");
+    if ((upload || neuesProjekt) && ordnerGroesse(config.datenDir) > w.maxSpeicherGb * 1024 ** 3) {
+      throw new HttpFehler(507, "Der Speicher des Bots ist voll – alte Projekte verwerfen oder später nochmal (nach 14 Tagen wird aufgeräumt).");
+    }
+    const meine = offen(nutzer);
+    if (neuesProjekt && meine.filter((a) => ["entwurf", "bereit", "arbeitet", "fehler"].includes(a.status)).length >= w.offeneProjekte) {
+      throw new HttpFehler(429, `Du hast schon ${w.offeneProjekte} offene Projekte – erst alte verwerfen (Meine Beiträge).`);
+    }
+    if (upload && meine.filter((a) => a.status === "arbeitet").length >= 2) {
+      throw new HttpFehler(429, "Bei dir laufen schon zwei Aufträge – bitte warten, bis einer fertig ist.");
+    }
+  }
+
+  /** Video nicht länger als erlaubt (gegen Missbrauch der Rechenzeit). */
+  async function laengePruefen(datei) {
+    const info = await untersuche(datei).catch((e) => {
+      throw new HttpFehler(400, `Das Video ließ sich nicht lesen: ${e.message.split("\n")[0]}`);
+    });
+    if (info.dauer > w.maxMinuten * 60) throw new HttpFehler(413, `Das Video ist länger als ${w.maxMinuten} Minuten.`);
+  }
 
   function eigenerAuftrag(nutzer, id) {
     const a = auftraege.get(id);
@@ -279,6 +333,7 @@ export async function starteWeb({ config, werkstatt }) {
       formate: Object.entries(FORMATE).map(([id, f]) => ({ id, titel: f.titel })),
       sharepicFormate: SHAREPIC_FORMATE,
       bildstile: BILDSTILE,
+      uebergaenge: Object.fromEntries(Object.entries(UEBERGAENGE).map(([art, u]) => [art, u.titel])),
       lagen: Object.fromEntries(Object.entries(LAGEN).filter(([l]) => l !== "auto" || werkstatt.gesichtAktiv)),
       logos: ppicng.logos.map((l) => ({ id: l.id, titel: l.titel, gruppe: l.gruppeTitel })),
       funktionen: { whisper: Boolean(config.whisper), gesicht: werkstatt.gesichtAktiv, postiz: Boolean(werkstatt.postiz), ki: Boolean(config.caption.anbieter) },
@@ -287,7 +342,7 @@ export async function starteWeb({ config, werkstatt }) {
     };
   }
 
-  async function api(req, res, url, nutzer) {
+  async function api(req, res, url, nutzer, ip) {
     const teile = url.pathname.split("/").filter(Boolean); // ["api", …]
     const [, bereich, id, aktion, clipId, clipAktion] = teile;
     const m = req.method;
@@ -312,6 +367,7 @@ export async function starteWeb({ config, werkstatt }) {
 
     // Neuer Beitrag: Sharepic ohne Foto
     if (bereich === "sharepic" && m === "POST") {
+      grenzenPruefen(nutzer, ip, { neuesProjekt: true });
       const daten = await jsonLesen(req);
       const a = werkstatt.neu({ plattform: "web", chat: nutzer, art: "sharepic", von: nutzer });
       auftraege.aendern(a.id, { status: "entwurf", e: bereinigen(daten.e, a.e, ppicng) });
@@ -321,13 +377,16 @@ export async function starteWeb({ config, werkstatt }) {
 
     // Neuer Beitrag: Video oder Foto hochladen
     if (bereich === "hochladen" && m === "POST") {
+      grenzenPruefen(nutzer, ip, { neuesProjekt: true, upload: true });
       const name = path.basename(url.searchParams.get("name") ?? "datei");
       const istVideo = VIDEO_ENDUNG.test(name) || String(req.headers["content-type"]).startsWith("video/");
       const a = werkstatt.neu({ plattform: "web", chat: nutzer, art: istVideo ? "video" : "sharepic", von: nutzer });
       try {
         if (istVideo) {
-          const original = path.join(a.ordner, `original${path.extname(name) || ".mp4"}`);
+          const original = path.join(a.ordner, `original${sichereEndung(name, "video")}`);
           await dateiLesen(req, original);
+          groesseVergessen(config.datenDir);
+          await laengePruefen(original);
           await werkstatt.videoAnnehmen(a, original, "", name);
           auftraege.aendern(a.id, { titel: name });
           await werkstatt.kanaeleVorwaehlen(a);
@@ -337,7 +396,7 @@ export async function starteWeb({ config, werkstatt }) {
             auftraege.aendern(a.id, { status: "entwurf", warnungen });
           });
         } else {
-          const roh = path.join(a.ordner, `eingang${path.extname(name) || ".jpg"}`);
+          const roh = path.join(a.ordner, `eingang${sichereEndung(name, "bild")}`);
           await dateiLesen(req, roh);
           const bild = path.join(a.ordner, "foto.png");
           await fotoNormalisieren(roh, bild);
@@ -363,6 +422,7 @@ export async function starteWeb({ config, werkstatt }) {
       if (a.status === "arbeitet") throw new HttpFehler(409, "Der Bot arbeitet gerade noch daran – gleich nochmal versuchen.");
       if (["gepostet", "geplant", "verworfen"].includes(a.status)) throw new HttpFehler(409, `Der Beitrag ist schon ${a.status}.`);
       auftraege.aendern(a.id, { plattform: "web", chat: nutzer, chatId: `web|${nutzer}`, freigabe: null, wartetAuf: null, status: a.ergebnis ? "bereit" : "entwurf" });
+      protokoll("uebernommen", { nutzer, ip, auftrag: a.id });
       if (a.art === "video") hintergrund(a, (schritt) => werkstatt.analysieren(a, schritt, { arbeitskopien: true }));
       return senden(res, 200, ansicht(a, werkstatt));
     }
@@ -429,10 +489,30 @@ export async function starteWeb({ config, werkstatt }) {
         return senden(res, 200, png, { "Content-Type": "image/png" });
       }
       // Eigenes Bild für Titelkarte, Abspann oder als Foto des Sharepics
+      // Hintergrundmusik hochladen bzw. zum Vorhören abrufen
+      case "POST musik": {
+        if (a.art !== "video") throw new HttpFehler(400, "Nur für Videos.");
+        beschaeftigt();
+        grenzenPruefen(nutzer, ip, { upload: true });
+        const name = path.basename(url.searchParams.get("name") ?? "musik.mp3");
+        const datei = path.join(a.ordner, `musik-${Date.now()}${sichereEndung(name, "ton")}`);
+        await dateiLesen(req, datei);
+        try {
+          await werkstatt.musikSetzen(a, datei, name);
+        } catch (e) {
+          await fsp.rm(datei, { force: true });
+          throw new HttpFehler(400, `Die Musik ließ sich nicht lesen: ${e.message.split("\n")[0]}`);
+        }
+        return senden(res, 200, ansicht(a, werkstatt));
+      }
+      case "GET musik":
+        return dateiSenden(req, res, a.e.ton?.musik?.datei);
+
       case "POST bild": {
         beschaeftigt();
         const zweck = aus(url.searchParams.get("zweck"), ["titelkarte", "abspann", "foto"], null);
         if (!zweck) throw new HttpFehler(400, "zweck fehlt.");
+        grenzenPruefen(nutzer, ip, { upload: true });
         const roh = path.join(a.ordner, `eingang-${Date.now()}`);
         await dateiLesen(req, roh);
         const bild = path.join(a.ordner, `${zweck}-${Date.now()}.png`);
@@ -452,6 +532,7 @@ export async function starteWeb({ config, werkstatt }) {
       }
       case "POST bauen": {
         beschaeftigt();
+        if (a.art === "video" && offen(nutzer).filter((x) => x.status === "arbeitet").length >= 2) throw new HttpFehler(429, "Bei dir laufen schon zwei Aufträge – bitte warten.");
         if (fertig) throw new HttpFehler(409, "Schon gepostet.");
         await speichern(await jsonLesen(req));
         // Noch kein Beitragstext (Sharepic aus dem Browser): Vorschlag aus Claim und Erklärtext bzw. per KI
@@ -495,13 +576,17 @@ export async function starteWeb({ config, werkstatt }) {
           return senden(res, 200, ansicht(a, werkstatt));
         }
         if (werkstatt.clips(a).length >= 30) throw new HttpFehler(400, "Höchstens 30 Clips je Video.");
+        grenzenPruefen(nutzer, ip, { upload: true });
         const name = path.basename(url.searchParams.get("name") ?? "clip.mp4");
-        const datei = path.join(a.ordner, `clip-${Date.now()}${path.extname(name) || ".mp4"}`);
+        const datei = path.join(a.ordner, `clip-${Date.now()}${sichereEndung(name, "video")}`);
         await dateiLesen(req, datei);
+        groesseVergessen(config.datenDir);
         try {
+          await laengePruefen(datei);
           await werkstatt.clipHinzufuegen(a, datei, name);
         } catch (e) {
           await fsp.rm(datei, { force: true });
+          if (e instanceof HttpFehler) throw e;
           throw new HttpFehler(400, `Das Video ließ sich nicht lesen: ${e.message.split("\n")[0]}`);
         }
         auftraege.aendern(a.id, { geaendert: true });
@@ -557,41 +642,57 @@ export async function starteWeb({ config, werkstatt }) {
           throw new HttpFehler(502, `Postiz hat nicht mitgespielt: ${e.message.slice(0, 800)}`);
         }
         auftraege.aendern(a.id, { schritt: "" });
+        protokoll(zeit ? "geplant" : "gepostet", { nutzer, ip, auftrag: a.id, kanaele: kanaele.map((c) => c.name), zeit: zeit?.toISOString() });
         return senden(res, 200, ansicht(a, werkstatt));
       }
     }
     throw new HttpFehler(404, "Unbekannte Adresse.");
   }
 
-  async function anmelden(req, res) {
-    const ip = req.socket.remoteAddress ?? "";
-    const jetzt = Date.now();
-    const liste = (versuche.get(ip) ?? []).filter((t) => jetzt - t < 15 * 60e3);
-    if (liste.length >= 10) throw new HttpFehler(429, "Zu viele Versuche – bitte in 15 Minuten nochmal.");
+  async function anmelden(req, res, ip) {
+    if (!w.anmeldung) throw new HttpFehler(400, "Hier braucht es keine Anmeldung.");
+    if (!grenzen.anmeldungAdresse.frei(ip)) throw new HttpFehler(429, "Zu viele Versuche – bitte in 15 Minuten nochmal.");
     const { nutzer = "", passwort = "", art = "" } = await jsonLesen(req, 10000);
+    const name = String(nutzer).trim().slice(0, 80);
+    if (!grenzen.anmeldungName.frei(name.toLowerCase())) throw new HttpFehler(429, "Zu viele Versuche für diesen Namen – bitte später nochmal.");
     let wer = null;
-    const perMatrix = w.matrixAnmeldung && nutzer && (art === "matrix" || !w.passwort);
+    let sitzungsArt = null;
+    const perMatrix = w.matrixAnmeldung && name && (art === "matrix" || !w.passwort);
     if (perMatrix) {
-      const id = await matrixPruefen(w.matrixUrl, String(nutzer).trim(), String(passwort));
-      if (id && !istErlaubt(w.erlaubt, id, "")) throw new HttpFehler(403, `${id} ist für die Web-Version nicht freigeschaltet.`);
+      const id = await matrixPruefen(w.matrixUrl, name, String(passwort).slice(0, 1000));
+      if (id && !istErlaubt(w.erlaubt, id, "")) {
+        protokoll("anmeldung-abgelehnt", { ip, nutzer: id, grund: "nicht in WEB_ERLAUBT" });
+        throw new HttpFehler(403, `${id} ist für die Web-Version nicht freigeschaltet.`);
+      }
       wer = id;
+      sitzungsArt = "matrix";
     } else if (w.passwort && passwort && gleich(passwort, w.passwort)) {
-      wer = `team:${String(nutzer).trim().slice(0, 40) || "team"}`;
+      wer = `team:${name.replace(/[^\p{L}\p{N} ._-]/gu, "").slice(0, 40) || "team"}`;
+      sitzungsArt = "passwort";
     }
     if (!wer) {
-      versuche.set(ip, [...liste, jetzt]);
+      grenzen.anmeldungAdresse.zaehlen(ip);
+      grenzen.anmeldungName.zaehlen(name.toLowerCase());
+      protokoll("anmeldung-fehlgeschlagen", { ip, nutzer: name, art: perMatrix ? "matrix" : "passwort" });
       throw new HttpFehler(401, "Anmeldung fehlgeschlagen.");
     }
-    const sicher = (req.headers["x-forwarded-proto"] ?? "") === "https" || req.socket.encrypted;
-    senden(res, 200, { nutzer: wer }, {
-      "Set-Cookie": `ppb=${encodeURIComponent(sitzungErstellen(geheimnis, wer))}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SITZUNG_TAGE * 86400}${sicher ? "; Secure" : ""}`,
-    });
+    // Alte Sitzung (z. B. Gast) ersetzen – keine Übernahme fremder Sitzungen
+    sitzungen.loeschen(cookies(req)[COOKIE]);
+    const schluessel = sitzungen.erstellen(wer, { art: sitzungsArt, merkmal: sitzungsArt === "passwort" ? passwortMerkmal(geheimnis, w.passwort) : null, tage: SITZUNG_TAGE });
+    protokoll("anmeldung", { ip, nutzer: wer, art: sitzungsArt });
+    senden(res, 200, { nutzer: wer }, { "Set-Cookie": cookieSetzen(schluessel, SITZUNG_TAGE) });
   }
 
   const server = http.createServer(async (req, res) => {
-    res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; font-src 'self'; frame-ancestors 'none'");
+    res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Referrer-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+    if (sicher) res.setHeader("Strict-Transport-Security", "max-age=31536000");
+    const ip = clientAdresse(req, w.proxy);
     try {
       const url = new URL(req.url, "http://localhost");
       if (STATISCH[url.pathname] && req.method === "GET") {
@@ -603,27 +704,60 @@ export async function starteWeb({ config, werkstatt }) {
       if (schrift) return dateiSenden(req, res, ppicng.schriften[schrift[1]]);
 
       if (!url.pathname.startsWith("/api/")) throw new HttpFehler(404, "Nicht gefunden.");
-      // Schutz vor Anfragen fremder Seiten: JSON-POSTs brauchen diesen Kopf, den Formulare nicht setzen können
-      if (req.method !== "GET" && req.headers["x-ppb"] !== "1") throw new HttpFehler(403, "Anfrage ohne X-PPB-Kopf.");
-      if (url.pathname === "/api/anmelden" && req.method === "POST") return await anmelden(req, res);
-      if (url.pathname === "/api/abmelden" && req.method === "POST") {
-        return senden(res, 200, { ok: true }, { "Set-Cookie": "ppb=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" });
+      if (!["GET", "HEAD", "POST"].includes(req.method)) throw new HttpFehler(405, "Methode nicht erlaubt.");
+      if (req.method === "POST") {
+        // Schutz vor Anfragen fremder Seiten: eigener Kopf (geht nur per Skript von derselben Seite) und Origin
+        if (req.headers["x-ppb"] !== "1") throw new HttpFehler(403, "Anfrage ohne X-PPB-Kopf.");
+        const origin = req.headers.origin;
+        if (origin && origin !== "null") {
+          let host = null;
+          try {
+            host = new URL(origin).host;
+          } catch {}
+          if (host !== req.headers.host) throw new HttpFehler(403, "Anfrage von einer fremden Seite.");
+        }
       }
-      const nutzer = w.offen && !w.passwort && !w.matrixAnmeldung ? "offen" : sitzungLesen(geheimnis, cookies(req).ppb);
+      if (url.pathname === "/api/anmelden" && req.method === "POST") return await anmelden(req, res, ip);
+      if (url.pathname === "/api/abmelden" && req.method === "POST") {
+        const wer = nutzerAus(req);
+        sitzungen.loeschen(cookies(req)[COOKIE]);
+        if (wer) protokoll("abmeldung", { ip, nutzer: wer });
+        return senden(res, 200, { ok: true }, { "Set-Cookie": cookieSetzen("", 0) });
+      }
+      let nutzer = nutzerAus(req);
       if (url.pathname === "/api/ich") {
-        return senden(res, 200, { nutzer, anmeldung: { passwort: Boolean(w.passwort), matrix: w.matrixAnmeldung, matrixServer: w.matrixAnmeldung ? new URL(w.matrixUrl).host : null } });
+        const kopf = {};
+        // Offener Modus: jeder Browser bekommt eine Gast-Sitzung (Projekte gehören diesem Browser)
+        if (!nutzer && !w.anmeldung && grenzen.gaeste.erlauben(ip)) {
+          nutzer = `gast:${crypto.randomBytes(9).toString("base64url")}`;
+          kopf["Set-Cookie"] = cookieSetzen(sitzungen.erstellen(nutzer, { art: "gast", tage: 30 }), 30);
+        }
+        return senden(res, 200, {
+          nutzer,
+          modus: w.anmeldung ? "anmeldung" : "offen",
+          anmeldung: { passwort: Boolean(w.passwort), matrix: w.matrixAnmeldung, matrixServer: w.matrixAnmeldung ? new URL(w.matrixUrl).host : null },
+        }, kopf);
       }
       if (!nutzer) throw new HttpFehler(401, "Bitte anmelden.");
-      await api(req, res, url, nutzer);
+      await api(req, res, url, nutzer, ip);
     } catch (e) {
       const status = e instanceof HttpFehler ? e.status : 500;
-      if (status === 500) console.error("Web:", e);
-      if (!res.headersSent) senden(res, status, { fehler: status === 500 ? `Interner Fehler: ${e.message}` : e.message, ...(e.daten ?? {}) });
+      let meldung = e.message;
+      if (status === 500) {
+        // Keine Interna (Pfade, Fehlertexte) nach außen – nur eine Nummer zum Wiederfinden im Protokoll
+        const nummer = crypto.randomBytes(4).toString("hex");
+        console.error(`Web-Fehler ${nummer}:`, e);
+        meldung = `Interner Fehler (${nummer}) – bitte nochmal versuchen oder den Admins die Nummer nennen.`;
+      }
+      if (!res.headersSent) senden(res, status, { fehler: meldung, ...(e.daten ?? {}) });
       else res.destroy();
     }
   });
-  // Große Uploads über langsame Leitungen nicht abbrechen
-  server.requestTimeout = 0;
+  // Große Uploads dürfen dauern, langsames Senden der Köpfe nicht (Slowloris)
+  server.headersTimeout = 20e3;
+  server.requestTimeout = 60 * 60e3;
+  server.keepAliveTimeout = 5e3;
+  server.maxHeadersCount = 60;
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(w.port, w.adresse, resolve);

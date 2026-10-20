@@ -76,6 +76,11 @@ Warteschlange; es geht aber auch ganz ohne Telegram und Matrix.
 - **Abspielen wie geschnitten:** Der Player springt von Teil zu Teil und Clip zu Clip, die Untertitel laufen mit.
 - **Teilen** an der Abspielposition, **Anfang/Ende hier** kürzt den Teil, **Teil entfernen**, **früher/später**
   verschiebt ihn, Anfang und Ende auch auf die Hundertstelsekunde als Zahl. **Rückgängig/Wiederholen** (100 Schritte).
+- **Übergänge** je Schnitt: harter Schnitt, Überblendung, über Schwarz, über Weiß, Wischen, Schieben, Kreis –
+  0,1 bis 2 Sekunden lang, auf Wunsch „für alle Schnitte“. Bild und Ton werden dabei überblendet; das Video wird
+  um die Dauer der Übergänge kürzer. Im Player werden sie angedeutet, ganz echt im fertigen Video.
+- **Lautstärke je Teil** (0–200 %) und **stumm** – etwa, um eine Stelle mit Störgeräusch leise zu machen oder nur
+  Musik laufen zu lassen. An jedem Schnitt blendet der Ton ganz kurz, damit nichts knackt.
 - **Mehrere Clips:** weitere Videos hochladen; jeder Clip lässt sich (auch mehrmals) ganz ans Ende hängen.
   Unterschiedliche Formate passen sich dem Zielformat an (Rand oder Zuschnitt, je Teil).
 - **Untertitel bearbeiten:** Liste aller Untertitel im Schnitt – Text ändern, löschen, neue an der
@@ -90,7 +95,25 @@ Fürs Abspielen im Browser legt der Bot je Clip eine kleine Arbeitskopie an (H.2
 genaues Springen) sowie Filmstreifen und Tonwelle. Gerendert wird aus den Originalen – trim, concat, Untertitel,
 Logo und Bauchbinde in **einem** ffmpeg-Durchgang, damit der Pi nur einmal encodiert.
 
+### Ton
+
+- **Hintergrundmusik:** Audiodatei hochladen (MP3, M4A, OGG, WAV, FLAC). Sie läuft in Schleife unter dem Video,
+  blendet am Anfang ein und am Ende aus, Lautstärke und Startpunkt im Stück sind einstellbar. Mit **„Leiser, wenn
+  gesprochen wird“** (Ducking) geht sie automatisch zurück, sobald jemand redet. Im Player hört man sie zur
+  Kontrolle mit, das Ducking erst im fertigen Video. Bitte nur Musik verwenden, die ihr nutzen dürft.
+- **Lautstärke angleichen** (Standard an, `TON_ANGLEICHEN`): bringt das Video auf -16 LUFS, das Niveau, das
+  Instagram, TikTok & Co. erwarten – leise Handyaufnahmen werden lauter, laute nicht übersteuert.
+- **Rauschminderung** (`TON_RAUSCHMINDERUNG`): dämpft Wind und gleichmäßiges Rauschen.
+- Auch im Chat: 🎨 Gestaltung → 🔊 Ton – angleichen, Rauschminderung, Musik als Audiodatei schicken,
+  Musiklautstärke (leise/mittel/laut), Ducking.
+
+### Anmeldung und Sicherheit
+
 ![Web-Version](docs/web.png)
+
+**Ohne Postiz braucht die Web-Version keine Anmeldung.** Jeder Browser bekommt dann automatisch eine eigene
+Gast-Sitzung und sieht nur seine eigenen Projekte. **Ist Postiz eingerichtet, ist die Anmeldung Pflicht** –
+ohne startet die Web-Version gar nicht, damit niemand Fremdes auf eure Kanäle posten kann:
 
 ```
 WEB_PORT=8090
@@ -98,22 +121,38 @@ WEB_URL=https://posting.piraten-nuernberg.de
 # Anmeldung mit dem eigenen Konto von matrix.piratenpartei.de …
 WEB_MATRIX_ANMELDUNG=ja
 WEB_ERLAUBT=*:piratenpartei.de
-# … und/oder mit einem Team-Passwort
+# … und/oder mit einem Team-Passwort (mindestens 12 Zeichen)
 WEB_PASSWORT=
 # Posten über Postiz nur für bestimmte Leute (oder ja = alle Angemeldeten)
 WEB_POSTEN=@anja:piratenpartei.de,@bob:piratenpartei.de
 ```
 
-- **Anmeldung:** Mit `WEB_MATRIX_ANMELDUNG=ja` melden sich Piraten mit ihrem Matrix-Konto an; erlaubt ist, wer in
-  `WEB_ERLAUBT` passt (`*:piratenpartei.de` = alle mit Konto dort). Das Passwort geht nur einmal zur Prüfung an den
-  Matrix-Server, der Bot speichert es nicht und meldet die dabei entstandene Sitzung sofort wieder ab. Alternativ
-  oder zusätzlich `WEB_PASSWORT` als gemeinsames Team-Passwort. Ohne beides startet die Web-Version nicht (außer
-  ausdrücklich mit `WEB_OFFEN=ja`, nur fürs eigene Netz). Nach zehn Fehlversuchen ist für 15 Minuten Pause.
-- **Posten** im Browser ist standardmäßig aus (`WEB_POSTEN=nein`), weil damit jede angemeldete Person auf die
-  Kanäle der Partei posten könnte. Herunterladen geht immer.
-- **Jede Person sieht nur ihre eigenen Beiträge** (beim Team-Passwort: alle mit demselben Namen).
+- **Matrix-Anmeldung:** Erlaubt ist, wer in `WEB_ERLAUBT` passt (`*:piratenpartei.de` = alle mit Konto dort). Das
+  Passwort geht nur einmal per https zur Prüfung an den Matrix-Server, der Bot speichert es nicht und meldet die dabei
+  entstandene Sitzung sofort wieder ab. Fliegt jemand aus `WEB_ERLAUBT`, gilt seine Sitzung sofort nicht mehr.
+- **Team-Passwort:** mindestens 12 Zeichen. Wird es geändert, sind alle damit angemeldeten Sitzungen sofort ungültig.
+- **Posten** im Browser ist zusätzlich standardmäßig aus (`WEB_POSTEN=nein`): Anmelden heißt noch nicht posten
+  dürfen. Am besten konkrete Personen eintragen. Herunterladen geht immer.
+- **Sitzungen** liegen auf dem Server (nur als Hash, Datei nur für den Bot lesbar); im Cookie steht ein zufälliger
+  Schlüssel – `HttpOnly`, `SameSite=Strict`, mit https-`WEB_URL` außerdem `Secure` mit `__Host-`-Präfix und HSTS.
+  Abmelden löscht die Sitzung wirklich; eine Anmeldung ersetzt die alte Sitzung des Browsers.
+- **Gegen Raten:** nach 10 Fehlversuchen je Adresse 15 Minuten Pause, zusätzlich höchstens 20 Fehlversuche je Name
+  und Stunde.
+- **Gegen fremde Seiten (CSRF):** Schreibende Anfragen brauchen einen eigenen Kopf, den nur die Seite selbst setzen
+  kann, und einen passenden `Origin`. Strenge Content-Security-Policy, kein Einbetten in fremde Seiten.
+- **Gegen präparierte Dateien:** ffmpeg liest Hochgeladenes nur mit einer Liste erlaubter Formate und nur als lokale
+  Datei. Als Video getarnte Playlists (HLS, Concat), die Dateien des Servers einbinden wollen, werden abgelehnt;
+  gespeichert wird nur mit bekannten Endungen. Dateipfade kommen nie aus dem Browser.
+- **Gegen Missbrauch der Rechenzeit:** höchstens `WEB_UPLOADS_PRO_STUNDE` Uploads je Adresse, `WEB_MAX_MB` je Datei,
+  `WEB_MAX_MINUTEN` Videolänge, `WEB_OFFENE_PROJEKTE` je Person und zwei laufende Aufträge gleichzeitig, und
+  insgesamt höchstens `WEB_MAX_SPEICHER_GB`. Gerade im offenen Modus wichtig – wer die Seite öffentlich ins Netz stellt,
+  stellt Rechenzeit zur Verfügung; im Zweifel trotzdem ein Team-Passwort setzen.
+- **Protokoll:** Anmeldungen (auch fehlgeschlagene), Abmeldungen, Übernahmen und jedes Posten mit Person, Adresse und
+  Kanälen stehen in `daten/web-protokoll.log`. Interne Fehler zeigen nach außen nur eine Nummer, Details nur im Log.
 - **HTTPS:** Die Web-Version lauscht standardmäßig nur auf `127.0.0.1`. Davor gehört ein Reverse-Proxy mit HTTPS,
-  Vorlage für nginx: `pi/nginx.conf` (große Uploads durchreichen: `client_max_body_size`, `proxy_request_buffering off`).
+  Vorlage für nginx: `pi/nginx.conf` (Umleitung auf https, echte Adresse der Besucher, große Uploads durchreichen).
+  Nur dann wird `X-Real-IP` geglaubt (`WEB_PROXY`).
+- **Jede Person sieht nur ihre eigenen Beiträge** (beim Team-Passwort: alle mit demselben Namen).
 - Die Seite kommt ohne fremde Server aus (keine CDNs, keine Tracker), Schriften und Logos liefert der Bot selbst.
 
 ## Gesicht und Untertitel
@@ -236,15 +275,16 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 |---|---|
 | `src/bot.mjs` | Start; Ablauf im Chat: Eingang, Menüs bedienen, posten, Kontrolle |
 | `src/werkstatt.mjs` | gemeinsam für Bot und Web: Aufträge, Clips, Schnitt, Untertitel, Analyse, Bauen, Standbild, Postiz, Warteschlange |
-| `src/schnitt.mjs` | Schnittliste prüfen, Zeiten zwischen Clip und fertigem Video umrechnen, Untertitel mitnehmen |
+| `src/schnitt.mjs` | Schnittliste prüfen (inkl. Übergänge, Lautstärke je Teil), Zeiten zwischen Clip und fertigem Video umrechnen, Untertitel mitnehmen |
 | `src/web.mjs` · `web/` | Web-Version: HTTP-API (Anmeldung, Upload, Vorschau, Bauen, Posten) und Seite ohne Build-Schritt |
+| `src/websicherheit.mjs` | Sitzungen, Begrenzungen, Absenderadresse hinter dem Proxy, Sicherheitsprotokoll |
 | `src/gesicht.mjs` · `src/gesicht.py` | Gesicht finden (OpenCV), aufs Zielformat umrechnen, Lage der Untertitel wählen |
 | `src/plattform/telegram.mjs` | Telegram Bot API, Knöpfe |
 | `src/plattform/matrix.mjs` | Matrix Client-Server-API ohne SDK: Sync, Einladungen, Medien, Menüs mit Reaktionen |
 | `src/menues.mjs` | Texte und Knöpfe aller Menüs (für beide Plattformen gleich) |
 | `src/ppicng.mjs` | ppicng einlesen: Logos samt Varianten, Schriften, Farbschemata, Logosuche |
 | `src/grafik.mjs` | Sharepic, Logo-Plakette, Bauchbinde, Titelkarte im ppicng-Layout (Canvas) |
-| `src/video.mjs` | ffmpeg: Schnitt (trim/concat), Format, Untertitel, Logo, Bauchbinde, Titelkarte und Abspann; Arbeitskopien |
+| `src/video.mjs` | ffmpeg: Schnitt (trim, concat bzw. xfade), Ton (Lautstärke, Musik, Ducking, Lautheit, Rauschminderung), Format, Untertitel, Logo, Bauchbinde, Karten; Arbeitskopien; sichere Eingänge |
 | `src/untertitel.mjs` · `src/whisper.mjs` | SRT/ASS, Korrekturen, Spracherkennung mit whisper.cpp |
 | `src/caption.mjs` | Beitragstext (Claude, OpenAI oder einfacher Vorschlag), Kürzen |
 | `src/postiz.mjs` · `src/kontrolle.mjs` | Postiz Public API, Zeichenzählung, Anfragenlimit, Kontrolle nach dem Posten |

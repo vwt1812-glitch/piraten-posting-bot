@@ -24,6 +24,11 @@ function el(tag, attrs = {}, ...kinder) {
   return e;
 }
 
+/** Wie replaceChildren, aber null/undefined/false werden weggelassen (statt als Text „null“ zu erscheinen). */
+function ersetzen(ziel, ...kinder) {
+  ziel.replaceChildren(...kinder.flat().filter((k) => k !== null && k !== undefined && k !== false));
+}
+
 async function anfrage(pfad, { methode = "GET", json, body, kopf = {}, roh = false } = {}) {
   const res = await fetch(`/api/${pfad}`, {
     method: methode,
@@ -32,7 +37,7 @@ async function anfrage(pfad, { methode = "GET", json, body, kopf = {}, roh = fal
     signal: abbruch?.signal,
   });
   if (res.status === 401 && pfad !== "anmelden") {
-    zeigeAnmeldung();
+    start();
     throw new Error("Bitte anmelden.");
   }
   if (!res.ok) {
@@ -66,29 +71,44 @@ function hochladen(pfad, datei, fortschritt) {
 }
 
 const verzoegert = (fn, ms) => {
-  let t;
+  let t = null;
+  let offen = null; // Argumente eines noch nicht ausgeführten Aufrufs
   const f = (...args) => {
     clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
+    offen = args;
+    t = setTimeout(() => {
+      offen = null;
+      fn(...args);
+    }, ms);
   };
   f.sofort = (...args) => {
     clearTimeout(t);
-    fn(...args);
+    offen = null;
+    return fn(...args);
+  };
+  /** Steht noch etwas aus? Dann jetzt ausführen und abwarten. */
+  f.jetzt = async () => {
+    if (!offen) return;
+    clearTimeout(t);
+    const args = offen;
+    offen = null;
+    await fn(...args);
   };
   return f;
 };
 
 function meldung(ziel, text, art = "fehler") {
-  ziel.replaceChildren(text ? el("p", { class: art, role: art === "fehler" ? "alert" : "status" }, text) : "");
+  ersetzen(ziel, text ? el("p", { class: art, role: art === "fehler" ? "alert" : "status" }, text) : "");
 }
 
 const logoUrl = (id, schrift = "000000") => `/api/logo/${id}?schrift=${schrift.replace("#", "")}`;
 
 // ---------- Anmeldung ----------
 
-async function zeigeAnmeldung() {
+let modus = "anmeldung";
+
+async function zeigeAnmeldung({ anmeldung }) {
   document.getElementById("nav").hidden = true;
-  const { anmeldung } = await fetch("/api/ich").then((r) => r.json());
   const fehler = el("div");
   let art = anmeldung.matrix ? "matrix" : "passwort";
   const nutzer = el("input", { type: "text", id: "nutzer", autocomplete: "username" });
@@ -124,13 +144,14 @@ async function zeigeAnmeldung() {
   fehler,
   el("p", {}, el("button", { type: "submit" }, "Anmelden")),
   anmeldung.matrix ? el("p", { class: "leise" }, "Dein Passwort geht nur einmal an deinen Matrix-Server zur Prüfung und wird nicht gespeichert.") : null);
-  app.replaceChildren(form);
+  ersetzen(app, form);
   (anmeldung.matrix ? nutzer : passwort).focus();
 }
 
 document.getElementById("abmelden").addEventListener("click", async () => {
   await anfrage("abmelden", { methode: "POST" }).catch(() => {});
-  zeigeAnmeldung();
+  optionen = null;
+  start();
 });
 
 // ---------- Startseite ----------
@@ -161,7 +182,7 @@ function startseite() {
       meldung(fehler, e.message);
     }
   };
-  app.replaceChildren(
+  ersetzen(app, 
     el("h1", {}, "Was möchtest du gestalten?"),
     el("div", { class: "start" },
       el("div", { class: "karte" },
@@ -177,6 +198,7 @@ function startseite() {
         datei, fortschritt,
         el("p", { class: "leise" }, `Bis ${optionen.maxMb} MB. Fotos werden zum Sharepic mit Foto bzw. zum Foto mit Logo.`))),
     fehler,
+    modus === "offen" ? el("p", { class: "leise" }, "Ohne Anmeldung: Deine Projekte hängen an diesem Browser. Wer den Browser-Speicher löscht, kommt nicht mehr an sie heran – fertige Dateien also herunterladen.") : null,
     optionen.ppicngUrl ? el("p", { class: "leise" }, "Mehr Designs für Bilder gibt es in ", el("a", { href: optionen.ppicngUrl, rel: "noopener" }, "ppicng"), ".") : null,
   );
 }
@@ -184,7 +206,7 @@ function startseite() {
 async function meineSeite() {
   const liste = await anfrage("auftraege");
   const statusText = { entwurf: "Entwurf", bereit: "fertig", gepostet: "gepostet", geplant: "geplant", arbeitet: "in Arbeit", fehler: "Fehler" };
-  app.replaceChildren(
+  ersetzen(app, 
     el("h1", {}, "Meine Beiträge"),
     liste.length
       ? el("ul", { class: "liste" }, liste.map((a) => el("li", {}, el("a", { href: `#/a/${a.id}` },
@@ -198,10 +220,14 @@ async function meineSeite() {
 // ---------- Schnitt (gleiche Rechnung wie src/schnitt.mjs) ----------
 
 const teilDauer = (t) => t.bis - t.von;
-const schnittDauer = (schnitt) => schnitt.reduce((s, t) => s + teilDauer(t), 0);
+// Mit Übergang überlappen sich zwei Teile um dessen Dauer; jeder Teil gehört bis zum Anfang des nächsten
+const ueberlappung = (schnitt, i) => (i > 0 && schnitt[i]?.uebergang ? schnitt[i].uebergang.dauer : 0);
+const schnittDauer = (schnitt) => schnitt.reduce((s, t, i) => s + teilDauer(t) - ueberlappung(schnitt, i), 0);
+const eigenesEnde = (schnitt, i) => schnitt[i].bis - ueberlappung(schnitt, i + 1);
 function teilAnfaenge(schnitt) {
   let t = 0;
-  return schnitt.map((teil) => {
+  return schnitt.map((teil, i) => {
+    t -= ueberlappung(schnitt, i);
     const anfang = t;
     t += teilDauer(teil);
     return anfang;
@@ -210,7 +236,8 @@ function teilAnfaenge(schnitt) {
 function imClip(schnitt, zeit) {
   const anfaenge = teilAnfaenge(schnitt);
   for (let i = 0; i < schnitt.length; i++) {
-    if (zeit < anfaenge[i] + teilDauer(schnitt[i]) || i === schnitt.length - 1) {
+    const ende = i < schnitt.length - 1 ? anfaenge[i + 1] : anfaenge[i] + teilDauer(schnitt[i]);
+    if (zeit < ende || i === schnitt.length - 1) {
       return { index: i, clip: schnitt[i].clip, t: Math.min(schnitt[i].bis, Math.max(schnitt[i].von, schnitt[i].von + zeit - anfaenge[i])) };
     }
   }
@@ -220,10 +247,11 @@ function schnittCues(cues, schnitt) {
   const anfaenge = teilAnfaenge(schnitt);
   const ergebnis = [];
   schnitt.forEach((teil, i) => {
+    const bis = eigenesEnde(schnitt, i) * 1000;
     cues.forEach((c, index) => {
-      if (c.clip !== teil.clip || c.end <= teil.von * 1000 || c.start >= teil.bis * 1000) return;
+      if (c.clip !== teil.clip || c.end <= teil.von * 1000 || c.start >= bis) return;
       const start = Math.round(Math.max(c.start, teil.von * 1000) - teil.von * 1000 + anfaenge[i] * 1000);
-      const end = Math.round(Math.min(c.end, teil.bis * 1000) - teil.von * 1000 + anfaenge[i] * 1000);
+      const end = Math.round(Math.min(c.end, bis) - teil.von * 1000 + anfaenge[i] * 1000);
       if (end - start >= 200) ergebnis.push({ start, end, text: c.text, index });
     });
   });
@@ -235,7 +263,7 @@ const zeitGenau = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4
  * Schnittplatz: Arbeitskopien abspielen, als wäre schon geschnitten; Teile teilen, kürzen, entfernen,
  * verschieben; Clips anhängen; Untertitel im Schnitt bearbeiten. Speichert selbst, meldet Änderungen.
  */
-function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, untertitelAn }) {
+function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, untertitelAn, ton }) {
   const clips = new Map(a.clips.map((c) => [c.id, c]));
   let schnitt = structuredClone(a.schnitt);
   let cues = structuredClone(a.untertitel);
@@ -280,17 +308,43 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
       video.addEventListener("error", () => reject(new Error("Arbeitskopie lässt sich nicht abspielen.")), { once: true });
     });
   }
+  /** Lautstärke des Teils im Player (über 100 % hört man erst im fertigen Video). */
+  function tonDesTeils() {
+    const teil = schnitt[aktiv];
+    video.muted = Boolean(teil?.stumm);
+    video.volume = Math.min(1, teil?.lautstaerke ?? 1);
+  }
+  // Hintergrundmusik zum Vorhören (das Leiserwerden unter Sprache gibt es erst im fertigen Video)
+  const musik = el("audio", { preload: "auto", loop: true });
+  const spielerFlaeche = el("div", { class: "spieler" }, video, untertitelZeile, musik);
+  function musikMit(spielen) {
+    const m = ton()?.musik;
+    if (!m) return musik.pause();
+    const src = `/api/auftrag/${id}/musik?n=${encodeURIComponent(m.name)}`;
+    if (musik.dataset.src !== src) {
+      musik.dataset.src = src;
+      musik.src = src;
+    }
+    musik.volume = Math.min(1, m.lautstaerke ?? 0.25);
+    try {
+      musik.currentTime = ((m.ab ?? 0) + zeit) % Math.max(1, m.dauer ?? 1);
+    } catch {}
+    if (spielen) musik.play().catch(() => {});
+    else musik.pause();
+  }
   async function springe(t) {
     zeit = Math.max(0, Math.min(t, Math.max(0, dauer() - 0.001)));
     const ort = imClip(schnitt, zeit);
     if (!ort) return;
     aktiv = ort.index;
+    tonDesTeils();
     try {
       await laden(ort.clip);
       video.currentTime = ort.t;
     } catch (err) {
       sagen(err.message);
     }
+    if (!spielt) musikMit(false);
     anzeigen();
   }
   async function abspielen() {
@@ -299,6 +353,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     else await springe(zeit);
     spielt = true;
     knopfPlay.textContent = "⏸";
+    musikMit(true);
     await video.play().catch(() => {});
     requestAnimationFrame(schleife);
   }
@@ -306,7 +361,18 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     spielt = false;
     knopfPlay.textContent = "▶";
     video.pause();
+    musik.pause();
   }
+  /** Übergang im Player andeuten (das echte xfade gibt es im fertigen Video). */
+  function uebergangZeigen(u) {
+    if (!u) return;
+    spielerFlaeche.dataset.uebergang = u.art;
+    spielerFlaeche.style.setProperty("--uebergang", `${u.dauer}s`);
+    spielerFlaeche.classList.remove("uebergang");
+    void spielerFlaeche.offsetWidth; // Animation neu starten
+    spielerFlaeche.classList.add("uebergang");
+  }
+
   async function schleife() {
     if (!spielt) return;
     if (!wechselt) {
@@ -314,16 +380,19 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
       const anfaenge = teilAnfaenge(schnitt);
       const ct = video.currentTime;
       zeit = anfaenge[aktiv] + Math.max(0, ct - teil.von);
-      if (ct >= teil.bis - 0.02 || video.ended) {
+      if (ct >= eigenesEnde(schnitt, aktiv) - 0.02 || video.ended) {
         const naechster = schnitt[aktiv + 1];
         if (!naechster) {
           zeit = dauer();
           pause();
-        } else if (naechster.clip === teil.clip && Math.abs(naechster.von - teil.bis) < 0.05) {
+        } else if (naechster.clip === teil.clip && Math.abs(naechster.von - teil.bis) < 0.05 && !naechster.uebergang) {
           aktiv++;
+          tonDesTeils();
         } else {
           wechselt = true;
           aktiv++;
+          tonDesTeils();
+          uebergangZeigen(naechster.uebergang);
           try {
             await laden(naechster.clip);
             video.currentTime = naechster.von;
@@ -348,7 +417,20 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     fn();
     nachAenderung(text);
   }
+  /** Übergänge gültig halten (wie schnittPruefen auf dem Server): nicht am ersten Teil, höchstens halb so lang wie der kürzere Teil. */
+  function uebergaengeBegrenzen() {
+    schnitt = schnitt.map((teil, i) => {
+      if (!teil.uebergang) return teil;
+      const grenze = i === 0 ? 0 : Math.min(2, teilDauer(schnitt[i - 1]) / 2, teilDauer(teil) / 2);
+      if (grenze < 0.1) {
+        const { uebergang, ...rest } = teil;
+        return rest;
+      }
+      return teil.uebergang.dauer > grenze ? { ...teil, uebergang: { ...teil.uebergang, dauer: Math.floor(grenze * 100) / 100 } } : teil;
+    });
+  }
   function nachAenderung(text) {
+    uebergaengeBegrenzen();
     auswahl = Math.max(0, Math.min(auswahl, schnitt.length - 1));
     zeit = Math.min(zeit, Math.max(0, dauer() - 0.001));
     speichernSchnitt();
@@ -371,7 +453,9 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     const teil = schnitt[ort.index];
     if (ort.t - teil.von < 0.1 || teil.bis - ort.t < 0.1) return sagen("Zu nah am Rand des Teils – etwas weiter in die Mitte.");
     aendern(() => {
-      schnitt.splice(ort.index, 1, { ...teil, bis: ort.t }, { ...teil, von: ort.t });
+      const hinten = { ...teil, von: ort.t };
+      delete hinten.uebergang; // die Blende gehört an den Anfang des vorderen Teils
+      schnitt.splice(ort.index, 1, { ...teil, bis: ort.t }, hinten);
       auswahl = ort.index + 1;
     }, "✂️ Geteilt – jetzt z. B. ein Teil auswählen und entfernen.");
   }
@@ -419,6 +503,33 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
       schnitt[auswahl] = neu;
     });
   }
+  /** Übergang in Teil i (bzw. "alle"); Dauer höchstens die halbe Länge des kürzeren Teils. */
+  function uebergangSetzen(i, u) {
+    const setzen = (k) => {
+      if (k < 1) return;
+      const teil = { ...schnitt[k] };
+      if (!u) delete teil.uebergang;
+      else {
+        const grenze = Math.min(2, teilDauer(schnitt[k - 1]) / 2, teilDauer(teil) / 2);
+        if (grenze < 0.1) return;
+        teil.uebergang = { art: u.art, dauer: Math.round(Math.min(grenze, Math.max(0.1, u.dauer || 0.5)) * 100) / 100 };
+      }
+      schnitt[k] = teil;
+    };
+    aendern(() => {
+      if (i === "alle") schnitt.forEach((_, k) => setzen(k));
+      else setzen(i);
+    }, u ? `⧓ ${optionen.uebergaenge[u.art]}${i === "alle" ? " an allen Schnitten" : ""}.` : "Harter Schnitt.");
+  }
+
+  function tonSetzen(felder) {
+    aendern(() => {
+      const teil = { ...schnitt[auswahl], ...felder };
+      if (teil.lautstaerke === 1) delete teil.lautstaerke;
+      if (!teil.stumm) delete teil.stumm;
+      schnitt[auswahl] = teil;
+    }, felder.stumm ? "🔇 Teil stumm." : "🔊 Lautstärke geändert.");
+  }
   function ganzAnhaengen(clip) {
     aendern(() => {
       schnitt.push({ clip: clip.id, von: 0, bis: clip.dauer });
@@ -465,34 +576,50 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
 
   function zeichnen() {
     const d = dauer() || 1;
-    teileSpur.replaceChildren(...schnitt.map((teil, i) => {
+    ersetzen(teileSpur, ...schnitt.map((teil, i) => {
       const clip = clips.get(teil.clip);
       const td = teilDauer(teil);
       const breite = `${(clip.dauer / td) * 100}%`;
       const links = `${(-teil.von / td) * 100}%`;
       return el("div", {
-        class: `teil${i === auswahl ? " gewaehlt" : ""}`, style: { flexGrow: String(td) }, title: `${clip.name}: ${zeitGenau(teil.von)}–${zeitGenau(teil.bis)}`,
+        class: `teil${i === auswahl ? " gewaehlt" : ""}`, style: { flexGrow: String(td) },
+        title: `${clip.name}: ${zeitGenau(teil.von)}–${zeitGenau(teil.bis)}${teil.uebergang ? ` · ${optionen.uebergaenge[teil.uebergang.art]} ${teil.uebergang.dauer} s` : ""}`,
       },
+      teil.uebergang ? el("span", { class: "uebergang-marke", "aria-hidden": "true" }, "⧓") : null,
       clip.bereit && clip.bilder ? el("img", { class: "streifen", src: `/api/auftrag/${id}/clip/${clip.id}/streifen`, alt: "", draggable: "false", style: { width: breite, left: links } }) : el("span", { class: "leise" }, "wird vorbereitet …"),
       clip.welle ? el("img", { class: "welle", src: `/api/auftrag/${id}/clip/${clip.id}/welle`, alt: "", draggable: "false", style: { width: breite, left: links } }) : null,
-      el("span", { class: "teil-name" }, clips.size > 1 ? clip.name : `${i + 1}`));
+      el("span", { class: "teil-name" }, `${teil.stumm ? "🔇 " : teil.lautstaerke !== undefined && teil.lautstaerke !== 1 ? `🔊${Math.round(teil.lautstaerke * 100)} % ` : ""}${clips.size > 1 ? clip.name : i + 1}`));
     }));
     const aus = schnittCues(cues, schnitt);
-    utSpur.replaceChildren(...aus.map((c) => el("div", {
+    ersetzen(utSpur, ...aus.map((c) => el("div", {
       class: "ut-block", title: c.text,
       style: { left: `${(c.start / 1000 / d) * 100}%`, width: `${((c.end - c.start) / 1000 / d) * 100}%` },
     })));
     const teil = schnitt[auswahl];
     const clip = clips.get(teil.clip);
     const zahl = (feld) => el("input", { type: "number", step: "0.1", min: "0", max: String(clip.dauer.toFixed(1)), value: teil[feld].toFixed(2), "aria-label": feld === "von" ? "Anfang im Clip (Sekunden)" : "Ende im Clip (Sekunden)", onchange: (ev) => grenzeSetzen(feld, ev.target.value) });
-    teilInfo.replaceChildren(
+    ersetzen(teilInfo, 
       el("strong", {}, `Teil ${auswahl + 1} von ${schnitt.length}`), " · ", clip.name,
       el("div", { class: "reihe zahlen" }, el("label", { class: "zeile" }, "von", zahl("von")), el("label", { class: "zeile" }, "bis", zahl("bis")), el("span", { class: "leise" }, `s im Clip (${zeitGenau(clip.dauer)})`)),
+      auswahl > 0 ? el("div", { class: "reihe uebergang-wahl" },
+        el("label", { class: "zeile" }, "Übergang vom vorigen Teil",
+          el("select", { "aria-label": "Übergang vom vorigen Teil", onchange: (ev) => uebergangSetzen(auswahl, ev.target.value === "hart" ? null : { art: ev.target.value, dauer: teil.uebergang?.dauer ?? 0.5 }) },
+            Object.entries(optionen.uebergaenge).map(([art, titel]) => el("option", { value: art, selected: (teil.uebergang?.art ?? "hart") === art }, titel)))),
+        teil.uebergang ? el("label", { class: "zeile" },
+          el("input", { type: "number", min: "0.1", max: "2", step: "0.1", value: String(teil.uebergang.dauer), "aria-label": "Dauer des Übergangs in Sekunden",
+            onchange: (ev) => uebergangSetzen(auswahl, { ...teil.uebergang, dauer: Number(ev.target.value) }) }), "s") : null,
+        schnitt.length > 2 ? el("button", { type: "button", class: "zweit klein", title: "Diesen Übergang an allen Schnitten verwenden", onclick: () => uebergangSetzen("alle", teil.uebergang ?? null) }, "für alle Schnitte") : null) : null,
+      el("div", { class: "reihe ton-teil" },
+        el("label", { class: "zeile" }, "🔊",
+          el("input", { type: "range", min: "0", max: "200", step: "5", value: String(Math.round((teil.lautstaerke ?? 1) * 100)), "aria-label": "Lautstärke dieses Teils",
+            disabled: Boolean(teil.stumm), oninput: (ev) => (ev.target.nextSibling.textContent = `${ev.target.value} %`), onchange: (ev) => tonSetzen({ lautstaerke: Number(ev.target.value) / 100 }) }),
+          el("span", { class: "leise" }, `${Math.round((teil.lautstaerke ?? 1) * 100)} %`)),
+        el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: Boolean(teil.stumm), onchange: (ev) => tonSetzen({ stumm: ev.target.checked }) }), "stumm")),
       el("div", { class: "reihe" },
         el("button", { type: "button", class: "zweit klein", onclick: () => verschieben(-1), disabled: auswahl === 0 }, "◀ früher"),
         el("button", { type: "button", class: "zweit klein", onclick: () => verschieben(1), disabled: auswahl === schnitt.length - 1 }, "später ▶"),
         el("button", { type: "button", class: "zweit klein", onclick: () => entfernen(), disabled: schnitt.length < 2 }, "🗑️ Teil entfernen")));
-    clipListe.replaceChildren(
+    ersetzen(clipListe, 
       el("strong", {}, "Clips"),
       el("ul", { class: "clipliste" }, [...clips.values()].map((c) => el("li", {},
         el("span", {}, `${c.name} · ${zeitGenau(c.dauer)}${c.bereit ? "" : " · wird vorbereitet"}`),
@@ -508,7 +635,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
             }
           } }, "✕") : null)))),
       clipHochladen);
-    cueListe.replaceChildren(...aus.map((c) => {
+    ersetzen(cueListe, ...aus.map((c) => {
       const eingabe = el("input", { type: "text", maxlength: 300, "aria-label": `Untertitel ab ${zeitGenau(c.start / 1000)}`, oninput: () => {
         cues[c.index] = { ...cues[c.index], text: eingabe.value };
         speichernCues();
@@ -544,6 +671,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     if (!f) return;
     clipFortschritt.hidden = false;
     try {
+      await sichern(); // Ungespeicherte Schnitte nicht verlieren, wenn gleich neu geladen wird
       await hochladen(`auftrag/${id}/clip?name=${encodeURIComponent(f.name)}`, f, (p) => (clipFortschritt.firstChild.style.width = `${Math.round(p * 100)}%`));
       neuLaden();
     } catch (err) {
@@ -610,7 +738,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   const element = el("section", { class: "karte schnittplatz", "aria-label": "Schnitt" },
     el("h2", {}, "✂️ Schnitt"),
     el("div", { class: "schnitt-oben" },
-      el("div", { class: "spieler" }, video, untertitelZeile),
+      spielerFlaeche,
       el("div", { class: "schnitt-seite" }, teilInfo, clipListe)),
     werkzeuge, zeitleiste, hinweis,
     el("p", { class: "leise tasten" }, "Tasten: Leertaste abspielen · ← → ein Bild (mit Umschalt: 1 s) · S teilen · I/O Anfang/Ende hier · Entf Teil entfernen · Strg+Z rückgängig"),
@@ -623,7 +751,10 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
       cueListe));
   zeichnen();
   springe(0);
-  return { element, stand: () => ({ schnitt, untertitel: cues }) };
+  async function sichern() {
+    await Promise.all([speichernSchnitt.jetzt(), speichernCues.jetzt()]);
+  }
+  return { element, stand: () => ({ schnitt, untertitel: cues }), sichern };
 }
 
 // ---------- Editor ----------
@@ -642,7 +773,7 @@ async function editor(id) {
   const oben = el("div");
   let platz = null;
   let standbildZeit = null;
-  app.replaceChildren(oben, el("div", { class: "editor" }, formular, seitenleiste));
+  ersetzen(app, oben, el("div", { class: "editor" }, formular, seitenleiste));
 
   // --- Speichern und Vorschau ---
   const speichern = verzoegert(async () => {
@@ -657,7 +788,7 @@ async function editor(id) {
   const bildZeigen = (blob, hinweis) => {
     if (vorschauUrl) URL.revokeObjectURL(vorschauUrl);
     vorschauUrl = URL.createObjectURL(blob);
-    vorschau.replaceChildren(el("img", { src: vorschauUrl, alt: "Vorschau" }), ...(hinweis ? [el("span", { class: "hinweis" }, hinweis)] : []));
+    ersetzen(vorschau, el("img", { src: vorschauUrl, alt: "Vorschau" }), ...(hinweis ? [el("span", { class: "hinweis" }, hinweis)] : []));
   };
   const vorschauLaden = verzoegert(async () => {
     if (istVideo && (!a.quelle || a.status === "arbeitet")) return;
@@ -670,7 +801,7 @@ async function editor(id) {
       const lage = res.headers.get("X-Lage");
       bildZeigen(blob, istVideo ? `Standbild${standbildZeit !== null ? ` bei ${zeitGenau(standbildZeit)}` : ""}${e.untertitel && lage ? ` · Untertitel ${{ unten: "unten", mitte: "Mitte", oben: "oben" }[lage]}${e.untertitelLage === "auto" ? " (automatisch)" : ""}` : ""}` : null);
     } catch (err) {
-      if (nr === vorschauNr && err.name !== "AbortError") vorschau.replaceChildren(el("p", { class: "fehler" }, err.message));
+      if (nr === vorschauNr && err.name !== "AbortError") ersetzen(vorschau, el("p", { class: "fehler" }, err.message));
     } finally {
       if (nr === vorschauNr) vorschau.classList.remove("arbeitet");
     }
@@ -722,13 +853,13 @@ async function editor(id) {
     const norm = (t) => t.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
     function aktualisieren() {
       const logo = optionen.logos.find((l) => l.id === e.logo);
-      aktuell.replaceChildren(logo ? el("img", { src: logoUrl(logo.id, "#000000"), alt: "" }) : "", el("span", {}, logo ? `${logo.titel} (${logo.gruppe})` : "ohne Logo"));
+      ersetzen(aktuell, logo ? el("img", { src: logoUrl(logo.id, "#000000"), alt: "" }) : "", el("span", {}, logo ? `${logo.titel} (${logo.gruppe})` : "ohne Logo"));
       zeigen();
     }
     function zeigen() {
       const s = norm(suche.value.trim());
       const treffer = s ? optionen.logos.filter((l) => norm(`${l.titel} ${l.gruppe} ${l.id}`).includes(s)).slice(0, 24) : [];
-      ergebnisse.replaceChildren(...treffer.map((l) => el("button", {
+      ersetzen(ergebnisse, ...treffer.map((l) => el("button", {
         type: "button", class: "logo-wahl", "aria-pressed": String(l.id === e.logo),
         onclick: () => {
           setze("logo", l.id);
@@ -785,6 +916,7 @@ async function editor(id) {
       const datei = el("input", { type: "file", accept: "image/*", class: "unsichtbar", onchange: async () => {
         if (!datei.files[0]) return zeichnen();
         try {
+          await sichern();
           a = await hochladen(`auftrag/${id}/bild?zweck=${art}`, datei.files[0]);
           e = { ...e, titelkarte: a.e.titelkarte, abspann: a.e.abspann, abspannAn: a.e.abspannAn };
           geaendert();
@@ -802,7 +934,7 @@ async function editor(id) {
         text.value = jetzt.text ?? "";
         felder.push(el("label", { for: claim.id }, "Claim"), claim, el("label", { for: text.id }, "Erklärtext (optional)"), text);
       }
-      inhalt.replaceChildren(el("label", { for: s.id }, titel), s, datei, ...felder, bildVorschau, fehler);
+      ersetzen(inhalt, el("label", { for: s.id }, titel), s, datei, ...felder, bildVorschau, fehler);
     }
     zeichnen();
     kartenVorschau();
@@ -841,10 +973,59 @@ async function editor(id) {
         srtFehler));
   }
 
+  /** Alles Ungespeicherte (Einstellungen, Schnitt, Untertitel) jetzt speichern – vor Uploads und Neuladen. */
+  async function sichern() {
+    await Promise.all([speichern.jetzt(), platz?.sichern()]);
+  }
+
   async function neuLaden() {
+    await sichern();
     a = await anfrage(`auftrag/${id}`);
     if (a.status === "arbeitet") beobachten();
     else aufbauen();
+  }
+
+  function tonBereich() {
+    const t = () => e.ton ?? { angleichen: true, rauschen: false, musik: null };
+    const setzeTon = (felder) => {
+      e.ton = { ...t(), ...felder };
+      geaendert();
+    };
+    const fehler = el("div");
+    const datei = el("input", { type: "file", accept: "audio/*", class: "unsichtbar", id: "musik-datei", onchange: async () => {
+      if (!datei.files[0]) return;
+      meldung(fehler, "Lade hoch …", "leise");
+      try {
+        await sichern();
+        a = await hochladen(`auftrag/${id}/musik?name=${encodeURIComponent(datei.files[0].name)}`, datei.files[0]);
+        e.ton = a.e.ton;
+        geaendert();
+        aufbauen();
+      } catch (err) {
+        meldung(fehler, err.message);
+      }
+    } });
+    const m = t().musik;
+    const musikTeile = m
+      ? [
+        el("p", {}, "🎵 ", el("strong", {}, m.name), ` · ${zeitGenau(m.dauer)} – läuft in Schleife unter dem Video`),
+        el("label", { for: "musik-laut" }, "Lautstärke der Musik"),
+        el("input", { type: "range", id: "musik-laut", min: "0", max: "100", step: "5", value: String(Math.round((m.lautstaerke ?? 0.25) * 100)), onchange: (ev) => setzeTon({ musik: { ...m, lautstaerke: Number(ev.target.value) / 100 } }) }),
+        el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: m.ducking !== false, onchange: (ev) => setzeTon({ musik: { ...m, ducking: ev.target.checked } }) }), "Leiser, wenn gesprochen wird (im fertigen Video)"),
+        el("label", { for: "musik-ab" }, "Musik beginnt bei (Sekunde im Stück)"),
+        el("input", { type: "number", id: "musik-ab", min: "0", step: "0.5", max: String(Math.max(0, m.dauer - 1)), value: String(m.ab ?? 0), onchange: (ev) => setzeTon({ musik: { ...m, ab: Number(ev.target.value) || 0 } }) }),
+        el("p", { class: "reihe" },
+          el("label", { for: "musik-datei", class: "knopf zweit klein", tabindex: "0" }, "Andere Musik"),
+          el("button", { type: "button", class: "zweit klein", onclick: () => { setzeTon({ musik: null }); aufbauen(); } }, "Musik entfernen")),
+      ]
+      : [el("p", {}, el("label", { for: "musik-datei", class: "knopf zweit klein", tabindex: "0" }, "🎵 Musik hinzufügen"))];
+    return el("details", { open: Boolean(m) || t().rauschen },
+      el("summary", {}, "Ton"),
+      el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: t().angleichen !== false, onchange: (ev) => setzeTon({ angleichen: ev.target.checked }) }), "Lautstärke angleichen (wie Instagram & Co. es erwarten)"),
+      el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: Boolean(t().rauschen), onchange: (ev) => setzeTon({ rauschen: ev.target.checked }) }), "Rauschminderung (Wind, Rauschen)"),
+      el("p", { class: "leise" }, "Lautstärke einzelner Stellen und Stummschalten: oben im Schnitt den Teil auswählen."),
+      ...musikTeile, datei, fehler,
+      el("p", { class: "leise" }, "Nur Musik verwenden, die ihr nutzen dürft (z. B. GEMA-frei oder eigene)."));
   }
 
   function bauchbindeBereich() {
@@ -864,6 +1045,7 @@ async function editor(id) {
     const datei = el("input", { type: "file", accept: "image/*", class: "unsichtbar", id: "foto", onchange: async () => {
       if (!datei.files[0]) return;
       try {
+        await sichern();
         a = await hochladen(`auftrag/${id}/bild?zweck=foto`, datei.files[0]);
         e = { ...e, bild: true, bildStil: a.e.bildStil };
         geaendert();
@@ -914,7 +1096,7 @@ async function editor(id) {
     try {
       daten = await anfrage(`auftrag/${id}/kanaele`);
     } catch (err) {
-      return ziel.replaceChildren(el("p", { class: "fehler" }, err.message));
+      return ersetzen(ziel, el("p", { class: "fehler" }, err.message));
     }
     const gewaehlt = new Set(daten.gewaehlt);
     const nachKunde = new Map();
@@ -951,14 +1133,14 @@ async function editor(id) {
         aufbauen();
       } catch (err) {
         if (err.status === 422) {
-          fehler.replaceChildren(el("p", { class: "fehler" }, `${err.message} ${err.daten.probleme.map((p) => `${p.name}: ${p.n}/${p.max}`).join(", ")}`),
+          ersetzen(fehler, el("p", { class: "fehler" }, `${err.message} ${err.daten.probleme.map((p) => `${p.name}: ${p.n}/${p.max}`).join(", ")}`),
             el("button", { type: "button", class: "klein", onclick: () => posten(planen, true) }, "✂️ Automatisch kürzen und posten"));
         } else {
           meldung(fehler, err.message);
         }
       }
     };
-    ziel.replaceChildren(
+    ersetzen(ziel, 
       el("h3", {}, "Posten über Postiz"),
       kanaele,
       el("p", { class: "reihe" }, el("button", { type: "button", onclick: () => posten(false) }, "✅ Jetzt posten")),
@@ -985,7 +1167,7 @@ async function editor(id) {
     } else if (a.ergebnis) {
       teile.push(el("p", { class: "leise" }, "Geändert – zum Herunterladen und Posten neu bauen."));
     }
-    aktionen.replaceChildren(...teile);
+    ersetzen(aktionen, ...teile);
     if (optionen.posten && a.ergebnis && !a.geaendert && !fertig && a.status !== "arbeitet") {
       const ziel = el("div");
       aktionen.append(ziel);
@@ -1013,11 +1195,11 @@ async function editor(id) {
     const v = a.ergebnis.version;
     if (istVideo) {
       const { breite, hoehe } = a.ergebnis.masse;
-      vorschau.replaceChildren(el("video", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}`, controls: true, playsinline: true, preload: "metadata", style: { aspectRatio: `${breite} / ${hoehe}`, width: breite > hoehe ? "100%" : "auto", height: breite > hoehe ? "auto" : "70vh" } }));
+      ersetzen(vorschau, el("video", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}`, controls: true, playsinline: true, preload: "metadata", style: { aspectRatio: `${breite} / ${hoehe}`, width: breite > hoehe ? "100%" : "auto", height: breite > hoehe ? "auto" : "70vh" } }));
       const lageText = a.lageAutomatisch && a.lage && a.lage !== "unten" ? ` · Untertitel ${a.lage === "oben" ? "oben" : "in der Mitte"} (unten wäre das Gesicht verdeckt)` : "";
       vorschauInfo.textContent = `Fertiges Video (Vorschau in kleiner Auflösung) · ${a.ergebnis.masse.breite}×${a.ergebnis.masse.hoehe}${lageText}`;
     } else {
-      vorschau.replaceChildren(el("img", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}`, alt: "Fertiges Sharepic" }));
+      ersetzen(vorschau, el("img", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}`, alt: "Fertiges Sharepic" }));
       vorschauInfo.textContent = "";
     }
   }
@@ -1026,9 +1208,9 @@ async function editor(id) {
   async function beobachten() {
     while (!abbruch.signal.aborted) {
       if (a.status !== "arbeitet") break;
-      status.replaceChildren(el("div", { class: "schritt" }, el("span", { class: "drehen", "aria-hidden": "true" }), a.schritt || "Arbeite …"));
+      ersetzen(status, el("div", { class: "schritt" }, el("span", { class: "drehen", "aria-hidden": "true" }), a.schritt || "Arbeite …"));
       if (!a.ergebnis || a.geaendert) oben.querySelector(".schnittplatz")?.classList.add("gesperrt");
-      aktionen.replaceChildren();
+      ersetzen(aktionen, );
       await new Promise((r) => setTimeout(r, 1500));
       try {
         a = await anfrage(`auftrag/${id}`);
@@ -1036,7 +1218,7 @@ async function editor(id) {
         return;
       }
     }
-    status.replaceChildren();
+    ersetzen(status, );
     // Nach der Analyse stehen Untertitel, Gesichtshinweise und Text fest – Formular neu aufbauen
     aufbauen();
   }
@@ -1056,7 +1238,7 @@ async function editor(id) {
       teile.push(...auswahl("format", optionen.formate.map((f) => [f.id, f.titel]), "Format"));
       teile.push(...auswahl("anpassen", [["rand", "mit unscharfem Rand auffüllen"], ["zuschneiden", "zuschneiden"]], "Passt nicht genau?"));
       teile.push(...designWahl(), ...logoBereich.block);
-      teile.push(untertitelBereich(), bauchbindeBereich(),
+      teile.push(untertitelBereich(), tonBereich(), bauchbindeBereich(),
         el("details", { open: Boolean(e.titelkarte || e.abspannAn) }, el("summary", {}, "Titelkarte und Abspann"), karteBereich("titelkarte"), karteBereich("abspann")));
     }
     teile.push(el("h3", {}, "Text für den Beitrag"), textBereich.block);
@@ -1065,7 +1247,7 @@ async function editor(id) {
       await anfrage(`auftrag/${id}/verwerfen`, { methode: "POST" }).catch(() => {});
       location.hash = "#/meine";
     } }, "🗑️ Verwerfen")));
-    formular.replaceChildren(...teile);
+    ersetzen(formular, ...teile);
     platz = istVideo && a.clips.length
       ? schnittplatz({
         id, a,
@@ -1079,6 +1261,7 @@ async function editor(id) {
           seitenleiste.scrollIntoView({ behavior: "smooth", block: "nearest" });
         },
         neuLaden,
+        ton: () => e.ton,
         untertitelAn: () => {
           if (e.untertitel) return;
           setze("untertitel", true);
@@ -1087,7 +1270,7 @@ async function editor(id) {
         },
       })
       : null;
-    oben.replaceChildren(platz?.element ?? "");
+    ersetzen(oben, platz?.element ?? "");
     textBereich.setzen();
     logoBereich.aktualisieren();
     zeigeErgebnis();
@@ -1095,7 +1278,7 @@ async function editor(id) {
   }
 
   if (a.status === "arbeitet") {
-    formular.replaceChildren(el("h1", {}, istVideo ? "🎬 Video" : "🖼️ Sharepic"), el("p", { class: "leise" }, "Das Video wird vorbereitet – Arbeitskopie zum Schneiden, Spracherkennung und Gesichtssuche können auf dem Pi ein paar Minuten dauern."));
+    ersetzen(formular, el("h1", {}, istVideo ? "🎬 Video" : "🖼️ Sharepic"), el("p", { class: "leise" }, "Das Video wird vorbereitet – Arbeitskopie zum Schneiden, Spracherkennung und Gesichtssuche können auf dem Pi ein paar Minuten dauern."));
     beobachten();
   } else {
     aufbauen();
@@ -1118,17 +1301,32 @@ async function route() {
     else if (location.hash === "#/meine") await meineSeite();
     else startseite();
   } catch (e) {
-    if (e.name !== "AbortError" && e.message !== "Bitte anmelden.") app.replaceChildren(el("p", { class: "fehler" }, e.message), el("p", {}, el("a", { href: "#/" }, "Zur Startseite")));
+    if (e.name !== "AbortError" && e.message !== "Bitte anmelden.") ersetzen(app, el("p", { class: "fehler" }, e.message), el("p", {}, el("a", { href: "#/" }, "Zur Startseite")));
   }
 }
 
 async function start() {
+  let ich;
+  try {
+    ich = await fetch("/api/ich").then((r) => r.json());
+  } catch {
+    ersetzen(app, el("p", { class: "fehler" }, "Der Server ist nicht erreichbar."));
+    return;
+  }
+  modus = ich.modus;
+  if (!ich.nutzer) {
+    optionen = null;
+    if (modus === "anmeldung") return zeigeAnmeldung(ich);
+    ersetzen(app, el("p", { class: "fehler" }, "Gerade kommen zu viele neue Besuche von deiner Adresse – bitte später nochmal."));
+    return;
+  }
   try {
     optionen = await anfrage("optionen");
   } catch {
     return;
   }
   document.getElementById("nav").hidden = false;
+  document.getElementById("abmelden").hidden = modus !== "anmeldung";
   route();
 }
 

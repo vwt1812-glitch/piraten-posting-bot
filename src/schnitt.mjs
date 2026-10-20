@@ -1,6 +1,10 @@
 // Schnitt: Ein Video-Beitrag besteht aus Clips (hochgeladene Dateien) und einer Schnittliste – Teile aus
 // diesen Clips in der Reihenfolge, in der sie im fertigen Video laufen:
-//   schnitt = [{ clip: "c1", von: 2.5, bis: 10 }, { clip: "c2", von: 0, bis: 4.2 }, …]   (Sekunden im Clip)
+//   schnitt = [{ clip: "c1", von: 2.5, bis: 10 }, { clip: "c2", von: 0, bis: 4.2, lautstaerke: 0.5 }, …]
+//   (Sekunden im Clip; optional lautstaerke 0–2 und stumm je Teil; ab dem zweiten Teil optional
+//   uebergang: { art: "blende", dauer: 0.5 } – wie dieser Teil aus dem vorigen hervorgeht)
+// Mit Übergang überlappen sich die beiden Teile um dessen Dauer; das Video wird entsprechend kürzer.
+// Jeder Teil „gehört“ von seinem Anfang bis zum Anfang des nächsten.
 // Untertitel liegen in der Zeit ihres Clips ({ clip, start, end, text }, Millisekunden) und werden erst für
 // das fertige Video auf den Schnitt umgerechnet – so bleiben sie richtig, wenn man später anders schneidet.
 // web/app.js rechnet im Browser genauso (gleiche Namen, damit man es vergleichen kann).
@@ -8,8 +12,23 @@
 export const MIN_TEIL = 0.1; // Sekunden – kürzere Teile verwirft der Schnitt
 export const MAX_TEILE = 200;
 
+/** Übergänge zwischen Teilen; `xfade` ist der Name des ffmpeg-Übergangs. */
+export const UEBERGAENGE = {
+  hart: { titel: "harter Schnitt", xfade: null },
+  blende: { titel: "Überblendung", xfade: "fade" },
+  schwarz: { titel: "über Schwarz", xfade: "fadeblack" },
+  weiss: { titel: "über Weiß", xfade: "fadewhite" },
+  wischen: { titel: "Wischen", xfade: "wipeleft" },
+  schieben: { titel: "Schieben", xfade: "slideleft" },
+  kreis: { titel: "Kreis", xfade: "circleopen" },
+};
+export const UEBERGANG_MIN = 0.1;
+export const UEBERGANG_MAX = 2;
+
 export const teilDauer = (t) => t.bis - t.von;
-export const schnittDauer = (schnitt) => schnitt.reduce((s, t) => s + teilDauer(t), 0);
+/** Überlappung zwischen Teil i-1 und Teil i (0 bei hartem Schnitt und beim ersten Teil). */
+export const ueberlappung = (schnitt, i) => (i > 0 && schnitt[i]?.uebergang ? schnitt[i].uebergang.dauer : 0);
+export const schnittDauer = (schnitt) => schnitt.reduce((s, t, i) => s + teilDauer(t) - ueberlappung(schnitt, i), 0);
 
 /** Ganzer Clip als ein Teil. */
 export const ganzerClip = (clip) => ({ clip: clip.id, von: 0, bis: clip.dauer });
@@ -29,22 +48,40 @@ export function schnittPruefen(schnitt, clips) {
     const max = dauer.get(t.clip);
     const von = Math.max(0, Math.min(Number(t.von) || 0, max));
     const bis = Math.max(0, Math.min(Number.isFinite(Number(t.bis)) ? Number(t.bis) : max, max));
-    if (bis - von >= MIN_TEIL) ergebnis.push({ clip: t.clip, von: Math.round(von * 1000) / 1000, bis: Math.round(bis * 1000) / 1000 });
+    if (bis - von < MIN_TEIL) continue;
+    const teil = { clip: t.clip, von: Math.round(von * 1000) / 1000, bis: Math.round(bis * 1000) / 1000 };
+    // Ton je Teil: Lautstärke 0–200 %, stumm
+    const lautstaerke = Number(t.lautstaerke);
+    if (Number.isFinite(lautstaerke) && lautstaerke !== 1) teil.lautstaerke = Math.round(Math.max(0, Math.min(2, lautstaerke)) * 100) / 100;
+    if (t.stumm === true) teil.stumm = true;
+    // Übergang aus dem vorigen Teil: höchstens die halbe Länge des kürzeren der beiden
+    const vorher = ergebnis.at(-1);
+    const art = t.uebergang?.art;
+    if (vorher && UEBERGAENGE[art]?.xfade) {
+      const grenze = Math.min(UEBERGANG_MAX, teilDauer(vorher) / 2, teilDauer(teil) / 2);
+      const d = Math.min(grenze, Math.max(UEBERGANG_MIN, Number(t.uebergang.dauer) || 0.5));
+      if (d >= UEBERGANG_MIN) teil.uebergang = { art, dauer: Math.round(d * 100) / 100 };
+    }
+    ergebnis.push(teil);
   }
   if (!ergebnis.length) throw new Error("Der Schnitt ist leer – mindestens ein Teil muss bleiben.");
   return ergebnis;
 }
 
-/** Wo im fertigen Video beginnt Teil i? */
+/** Wo im fertigen Video beginnt Teil i (mit Übergang: wo er hereinblendet)? */
 export function teilAnfaenge(schnitt) {
   const anfaenge = [];
   let t = 0;
-  for (const teil of schnitt) {
+  schnitt.forEach((teil, i) => {
+    t -= ueberlappung(schnitt, i);
     anfaenge.push(t);
     t += teilDauer(teil);
-  }
+  });
   return anfaenge;
 }
+
+/** Bis wohin im Clip ein Teil „gehört“ – bis der nächste hereinblendet. */
+export const eigenesEnde = (schnitt, i) => schnitt[i].bis - ueberlappung(schnitt, i + 1);
 
 /**
  * Zeitpunkt im fertigen Video → Teil und Zeit im Clip.
@@ -53,7 +90,7 @@ export function teilAnfaenge(schnitt) {
 export function imClip(schnitt, zeit) {
   const anfaenge = teilAnfaenge(schnitt);
   for (let i = 0; i < schnitt.length; i++) {
-    const ende = anfaenge[i] + teilDauer(schnitt[i]);
+    const ende = i < schnitt.length - 1 ? anfaenge[i + 1] : anfaenge[i] + teilDauer(schnitt[i]);
     if (zeit < ende || i === schnitt.length - 1) {
       const t = Math.min(schnitt[i].bis, Math.max(schnitt[i].von, schnitt[i].von + zeit - anfaenge[i]));
       return { index: i, clip: schnitt[i].clip, t };
@@ -72,7 +109,7 @@ export function schnittCues(cues, schnitt) {
   const ergebnis = [];
   schnitt.forEach((teil, i) => {
     const von = teil.von * 1000;
-    const bis = teil.bis * 1000;
+    const bis = eigenesEnde(schnitt, i) * 1000;
     const versatz = anfaenge[i] * 1000;
     cues.forEach((c, index) => {
       if (c.clip !== teil.clip || c.end <= von || c.start >= bis) return;
@@ -94,9 +131,9 @@ export function cuesZurueck(cues, schnitt) {
   for (const c of cues) {
     const ort = imClip(schnitt, c.start / 1000);
     if (!ort) continue;
-    const teil = schnitt[ort.index];
     const start = ort.t * 1000;
-    const ende = Math.min(teil.bis * 1000, start + (c.end - c.start));
+    const ende = Math.min(eigenesEnde(schnitt, ort.index) * 1000, start + (c.end - c.start));
+    const teil = schnitt[ort.index];
     if (ende - start >= 200) ergebnis.push({ clip: teil.clip, start: Math.round(start), end: Math.round(ende), text: c.text });
   }
   return ergebnis;

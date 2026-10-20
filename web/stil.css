@@ -149,3 +149,21 @@ details > summary { cursor: pointer; font-family: "Politics Head"; text-transfor
 .cues input { flex: 1; padding: .3rem .5rem; }
 .zeitknopf { font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; min-width: 5.2em; }
 summary.klein { font-size: .9rem; font-family: DejaRip, sans-serif; text-transform: none; }
+.ton-teil input[type=range] { width: 9em; }
+.uebergang-wahl select { width: auto; }
+.uebergang-wahl input[type=number] { width: 5em; }
+.uebergang-marke { position: absolute; left: -2px; bottom: 34px; z-index: 2; background: var(--lila); color: #fff; font-size: .75rem; line-height: 1; padding: 2px 3px; border-radius: 0 4px 4px 0; }
+/* Übergang im Player angedeutet */
+.spieler.uebergang .schnitt-video { animation: uebergang-blende var(--uebergang, .5s) ease-out; }
+.spieler.uebergang[data-uebergang="schwarz"] .schnitt-video { animation-name: uebergang-schwarz; }
+.spieler.uebergang[data-uebergang="weiss"] { background: #fff; }
+.spieler.uebergang[data-uebergang="weiss"] .schnitt-video { animation-name: uebergang-schwarz; }
+.spieler.uebergang[data-uebergang="wischen"] .schnitt-video { animation-name: uebergang-wischen; }
+.spieler.uebergang[data-uebergang="schieben"] .schnitt-video { animation-name: uebergang-schieben; }
+.spieler.uebergang[data-uebergang="kreis"] .schnitt-video { animation-name: uebergang-kreis; }
+@keyframes uebergang-blende { from { opacity: .35; } to { opacity: 1; } }
+@keyframes uebergang-schwarz { from { opacity: 0; } to { opacity: 1; } }
+@keyframes uebergang-wischen { from { clip-path: inset(0 0 0 100%); } to { clip-path: inset(0 0 0 0); } }
+@keyframes uebergang-schieben { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes uebergang-kreis { from { clip-path: circle(0% at 50% 50%); } to { clip-path: circle(75% at 50% 50%); } }
+@media (prefers-reduced-motion: reduce) { .spieler.uebergang .schnitt-video { animation: none; } }

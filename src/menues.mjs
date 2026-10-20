@@ -84,6 +84,7 @@ export function gestaltungMenu(a, ctx) {
     knoepfe.push([k(a, "format", `📐 Format: ${e.format === "original" ? "Original" : e.format}`)]);
     knoepfe.push([k(a, "untertitel", `📝 Untertitel: ${anAus(e.untertitel)}`), k(a, "bauchbinde", `🪪 Bauchbinde: ${anAus(e.bauchbindeAn && e.bauchbinde?.name)}`)]);
     knoepfe.push([k(a, "titelkarte", `🎬 Titelkarte: ${anAus(e.titelkarte)}`), k(a, "abspann", `🏁 Abspann: ${anAus(e.abspannAn)}`)]);
+    knoepfe.push([k(a, "ton", `🔊 Ton${e.ton?.musik ? " · 🎵" : ""}`)]);
   } else {
     knoepfe.push([k(a, "format", `📐 Format: ${e.sharepicFormat}`)]);
     knoepfe.push([k(a, "claim", "💬 Claim ändern"), k(a, "erklaertext", `📄 Erklärtext: ${anAus(e.text)}`)]);
@@ -197,6 +198,33 @@ export function karteMenu(a, ctx, art) {
   let text = `<b>${titel}</b>\n${beschreibung}`;
   if (ctx.ppicngUrl) text += `\nOder ein fertiges Sharepic aus der ppicng-Web-App schicken: ${html(ctx.ppicngUrl)}`;
   return { text, knoepfe };
+}
+
+export const MUSIK_STUFEN = [["leise", 0.15], ["mittel", 0.25], ["laut", 0.4]];
+const stufe = (l) => MUSIK_STUFEN.reduce((beste, s) => (Math.abs(s[1] - l) < Math.abs(beste[1] - l) ? s : beste))[0];
+
+export function tonMenu(a) {
+  const ton = a.e.ton ?? {};
+  const knoepfe = [
+    [k(a, "ta", `📏 Lautstärke angleichen: ${anAus(ton.angleichen !== false)}`)],
+    [k(a, "tr", `🌬️ Rauschminderung: ${anAus(ton.rauschen)}`)],
+  ];
+  if (ton.musik) {
+    knoepfe.push([k(a, "tm", `🔉 Musik: ${stufe(ton.musik.lautstaerke ?? 0.25)}`), k(a, "td", `🗣️ Unter Sprache leiser: ${anAus(ton.musik.ducking !== false)}`)]);
+    knoepfe.push([k(a, "tmusik", "🎵 Andere Musik …"), k(a, "tx", "🚫 Musik entfernen")]);
+  } else {
+    knoepfe.push([k(a, "tmusik", "🎵 Musik schicken …")]);
+  }
+  knoepfe.push(zurueck(a));
+  return {
+    text: [
+      "<b>🔊 Ton</b>",
+      "„Angleichen“ bringt die Lautstärke auf das Niveau von Instagram & Co., die Rauschminderung dämpft Wind und Rauschen.",
+      ton.musik ? `🎵 ${html(ton.musik.name)} – läuft in Schleife unter dem Video, wird leiser, wenn gesprochen wird.` : "Hintergrundmusik: einfach eine Audiodatei schicken (z. B. MP3). Achtet auf die Rechte!",
+      "Schneiden und Lautstärke einzelner Stellen: im Browser.",
+    ].join("\n"),
+    knoepfe,
+  };
 }
 
 export function bildstilMenu(a) {

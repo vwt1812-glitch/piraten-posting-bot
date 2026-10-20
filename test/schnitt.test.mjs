@@ -57,3 +57,26 @@ test("Untertitel aus dem Browser prüfen", () => {
     { clip: "c2", start: 0, end: 99999, text: "lang" }, { clip: "c1", start: 0, end: 50, text: "kurz" }, { clip: "c1", start: 0, end: 900, text: "" },
   ], CLIPS), [{ clip: "c1", start: 0, end: 900, text: "Hallo Welt" }, { clip: "c2", start: 0, end: 5000, text: "lang" }]);
 });
+
+test("Übergänge: geprüft, begrenzt, verkürzen das Video", () => {
+  const geprueft = schnittPruefen([
+    { clip: "c1", von: 0, bis: 4, uebergang: { art: "blende", dauer: 1 } }, // erster Teil: kein Übergang
+    { clip: "c2", von: 0, bis: 1, uebergang: { art: "blende", dauer: 5 } }, // höchstens halbe Länge des kürzeren
+    { clip: "c1", von: 6, bis: 10, uebergang: { art: "boese", dauer: 1 } },
+    { clip: "c1", von: 2, bis: 4, uebergang: { art: "hart" } },
+    { clip: "c2", von: 1, bis: 5, uebergang: { art: "schwarz" } },
+  ], CLIPS);
+  assert.deepEqual(geprueft.map((t) => t.uebergang ?? null), [null, { art: "blende", dauer: 0.5 }, null, null, { art: "schwarz", dauer: 0.5 }]);
+  // 4 + 1 + 4 + 2 + 4 − 0,5 − 0,5 = 14
+  assert.equal(schnittDauer(geprueft), 14);
+  assert.deepEqual(teilAnfaenge(geprueft), [0, 3.5, 4.5, 8.5, 10]);
+  // In der Überlappung gehört die Zeit schon dem neuen Teil
+  const ort = imClip(geprueft, 3.6);
+  assert.deepEqual([ort.index, ort.clip], [1, "c2"]);
+  assert.ok(Math.abs(ort.t - 0.1) < 1e-9);
+  assert.equal(imClip(geprueft, 3.4).index, 0);
+  // Untertitel des alten Teils enden, wo der neue hereinblendet
+  const aus = schnittCues([{ clip: "c1", start: 3000, end: 4000, text: "Ende" }, { clip: "c2", start: 0, end: 900, text: "neu" }], geprueft);
+  // (c1 kommt zweimal vor – der Untertitel also auch, im vierten Teil bis zur Blende in den fünften)
+  assert.deepEqual(aus.map((c) => [c.text, c.start, c.end]), [["Ende", 3000, 3500], ["neu", 3500, 4400], ["Ende", 9500, 10000]]);
+});

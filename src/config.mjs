@@ -95,23 +95,30 @@ function webConfig() {
   const port = env("WEB_PORT");
   if (!port) return null;
   const posten = env("WEB_POSTEN", "nein");
+  const adresse = env("WEB_ADRESSE", "127.0.0.1");
+  const lokal = ["127.0.0.1", "::1", "localhost"].includes(adresse);
   return {
     port: Number(port),
     // Öffentliche Adresse (hinter dem Reverse-Proxy), wird im Bot verlinkt, z. B. https://posting.piraten-xy.de
-    url: env("WEB_URL", ""),
-    adresse: env("WEB_ADRESSE", "127.0.0.1"),
-    // Anmeldung: gemeinsames Passwort und/oder das eigene Matrix-Konto
+    url: env("WEB_URL", "").replace(/\/$/, ""),
+    adresse,
+    // Nur einem Proxy die Absenderadresse glauben, wenn der Bot ausschließlich lokal lauscht
+    proxy: ja("WEB_PROXY", lokal),
+    // Anmeldung: gemeinsames Passwort und/oder das eigene Matrix-Konto. Mit Postiz Pflicht, ohne Postiz
+    // ist die Seite offen (Projekte gehören dann dem Browser), außer es ist trotzdem eine Anmeldung gesetzt.
     passwort: env("WEB_PASSWORT"),
     matrixAnmeldung: ja("WEB_MATRIX_ANMELDUNG", false),
     matrixUrl: env("WEB_MATRIX_URL", env("MATRIX_URL", "https://matrix.piratenpartei.de")).replace(/\/$/, ""),
     // Wer sich mit Matrix anmelden darf: @name:server, *:server
     erlaubt: liste("WEB_ERLAUBT"),
-    // Ohne jede Anmeldung nur mit WEB_OFFEN=ja (z. B. nur im eigenen Netz)
-    offen: ja("WEB_OFFEN", false),
     // Wer posten darf: ja (alle Angemeldeten), nein, oder Liste wie WEB_ERLAUBT
     posten: /^(ja|nein)$/i.test(posten) ? posten.toLowerCase() === "ja" : posten.split(",").map((s) => s.trim()).filter(Boolean),
+    // Grenzen gegen Missbrauch
     maxMb: Number(env("WEB_MAX_MB", "500")),
-    geheimnis: env("WEB_GEHEIMNIS"),
+    maxMinuten: Number(env("WEB_MAX_MINUTEN", "20")),
+    maxSpeicherGb: Number(env("WEB_MAX_SPEICHER_GB", "20")),
+    uploadsProStunde: Number(env("WEB_UPLOADS_PRO_STUNDE", "30")),
+    offeneProjekte: Number(env("WEB_OFFENE_PROJEKTE", "15")),
   };
 }
 
@@ -141,6 +148,8 @@ export function ladeConfig() {
       format: env("VIDEO_FORMAT", "original"),
       anpassen: env("VIDEO_ANPASSEN", "rand"),
       sharepicFormat: env("SHAREPIC_FORMAT", "1:1"),
+      tonAngleichen: ja("TON_ANGLEICHEN", true),
+      tonRauschen: ja("TON_RAUSCHMINDERUNG", false),
       untertitel: ja("UNTERTITEL_STANDARD", true),
       untertitelStil: env("UNTERTITEL_STIL", "box"),
       bauchbinde: env("BAUCHBINDE_NAME") ? { name: env("BAUCHBINDE_NAME"), funktion: env("BAUCHBINDE_FUNKTION", "") } : null,
@@ -172,8 +181,15 @@ export function ladeConfig() {
     throw new Error("Weder Telegram noch Matrix noch die Web-Version eingerichtet – TELEGRAM_BOT_TOKEN, MATRIX_TOKEN und/oder WEB_PORT in .env eintragen (Vorlage: .env.example).");
   }
   const w = config.web;
-  if (w && !w.passwort && !w.matrixAnmeldung && !w.offen) {
-    throw new Error("Web-Version ohne Anmeldung: WEB_PASSWORT setzen, WEB_MATRIX_ANMELDUNG=ja – oder ausdrücklich WEB_OFFEN=ja (nur im eigenen Netz!).");
+  if (w) {
+    w.anmeldung = Boolean(w.passwort || w.matrixAnmeldung);
+    if (config.postiz && !w.anmeldung) {
+      throw new Error("Mit Postiz braucht die Web-Version eine Anmeldung, sonst könnte jede:r posten: WEB_PASSWORT setzen und/oder WEB_MATRIX_ANMELDUNG=ja mit WEB_ERLAUBT.");
+    }
+    if (w.passwort && w.passwort.length < 12) throw new Error("WEB_PASSWORT ist zu kurz – mindestens 12 Zeichen (besser eine Passphrase aus mehreren Wörtern).");
+    if (w.matrixAnmeldung && !/^https:\/\//.test(w.matrixUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(w.matrixUrl)) {
+      throw new Error("WEB_MATRIX_URL muss mit https:// beginnen – sonst gingen Passwörter unverschlüsselt durchs Netz.");
+    }
   }
   if (w?.matrixAnmeldung && !w.erlaubt.length) throw new Error("WEB_MATRIX_ANMELDUNG braucht WEB_ERLAUBT, z. B. *:piratenpartei.de");
   return config;

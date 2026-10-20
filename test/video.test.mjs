@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { ladePpicng, logoNachId, farbschema } from "../src/ppicng.mjs";
 import { schriftenAnmelden } from "../src/grafik.mjs";
-import { zielMasse, flaecheFilter, schnittFilter, bauchbindeLage, renderArgs, rendern, untersuche } from "../src/video.mjs";
+import { zielMasse, flaecheFilter, schnittFilter, bauchbindeLage, renderArgs, rendern, untersuche, sichereEndung, tonUntersuchen, fotoNormalisieren } from "../src/video.mjs";
 import { zuAss, untertitelGroesse } from "../src/untertitel.mjs";
 
 const ppicng = ladePpicng(new URL("../ppicng", import.meta.url).pathname);
@@ -75,9 +75,9 @@ test("Schnitt im Filtergraphen: Teile aus mehreren Clips, ein Clip mehrfach", ()
   assert.match(graph, /\[e0v1\]setpts=PTS-STARTPTS,trim=start=5\.000:end=6\.500/);
   assert.match(graph, /\[fgrundt1\]/); // Querformat bekommt den Rand mit eigenen Labels
   assert.match(graph, /anullsrc=r=48000:cl=stereo,atrim=0:2\.000\[ta1\]/); // Clip ohne Ton
-  assert.match(graph, /\[tv0\]\[ta0\]\[tv1\]\[ta1\]\[tv2\]\[ta2\]concat=n=3:v=1:a=1\[flaeche\]\[ton\]/);
+  assert.match(graph, /\[tv0\]\[ta0\]\[tv1\]\[ta1\]\[tv2\]\[ta2\]concat=n=3:v=1:a=1\[flaeche\]\[geschnitten\]/);
   const ohneTon = schnittFilter([{ datei: "a.mp4", quelle: hoch, von: 0, bis: 1 }], { breite: 1080, hoehe: 1920 }, "rand", { mitTon: false }).filter.join(";");
-  assert.ok(!ohneTon.includes("[ton]") && !ohneTon.includes(":a]"));
+  assert.ok(!ohneTon.includes("[geschnitten]") && !ohneTon.includes(":a]"));
 });
 
 test("Geschnittenes Video wirklich bauen (zwei Clips, ein Teil herausgeschnitten)", { skip: !ffmpeg && "ffmpeg fehlt" }, async () => {
@@ -114,5 +114,109 @@ test("Video wirklich bauen (ffmpeg)", { skip: !ffmpeg && "ffmpeg fehlt" }, async
   assert.equal(fertig.breite, 1080);
   assert.equal(fertig.hoehe, 1920);
   assert.ok(Math.abs(fertig.dauer - 4) < 0.3, `Dauer ${fertig.dauer}`);
+  assert.ok(fertig.hatTon);
+});
+
+test("Ton: Lautstärke je Teil, Blenden am Schnitt, Rauschminderung, Musik mit Ducking, Lautheit", async () => {
+  const hoch = { breite: 720, hoehe: 1280, hatTon: true };
+  const graph = schnittFilter([{ datei: "a.mp4", quelle: hoch, von: 0, bis: 2, lautstaerke: 1.5 }, { datei: "a.mp4", quelle: hoch, von: 3, bis: 4, stumm: true }], { breite: 1080, hoehe: 1920 }, "rand").filter.join(";");
+  assert.match(graph, /volume=1\.5,afade=t=in:d=0\.020,afade=t=out:st=1\.980:d=0\.020\[ta0\]/);
+  assert.match(graph, /volume=0,afade/);
+  const ordner = fs.mkdtempSync(path.join(os.tmpdir(), "ppb-"));
+  const { args } = await renderArgs({
+    eingabe: "in.mp4", ausgabe: path.join(ordner, "out.mp4"), quelle: { breite: 1920, hoehe: 1080, dauer: 5, hatTon: true },
+    e: { ...EINST, titelkarte: null, abspannAn: false, ton: { rauschen: true, angleichen: true, musik: { datei: "musik.mp3", lautstaerke: 0.3, ducking: true, ab: 1 } } },
+    schema: farbschema("weiss-schwarz-orange"), logo: null, ass: null, fontsDir: "/x", zeiten: ZEITEN, video: VIDEO,
+  });
+  const g = args[args.indexOf("-filter_complex") + 1];
+  assert.match(g, /\[geschnitten\]afftdn/);
+  assert.match(g, /atrim=start=1\.000,asetpts=PTS-STARTPTS,atrim=0:5\.000.*volume=0\.3/);
+  assert.match(g, /sidechaincompress/);
+  assert.match(g, /loudnorm=I=-16/);
+  assert.match(g, /\[angeglichen\]anull\[ton\]/);
+  assert.equal(args[args.indexOf("musik.mp3") - 7], "-stream_loop"); // Musik läuft in Schleife
+  // Ohne Tonbearbeitung bleibt es beim geschnittenen Ton
+  const { args: schlicht } = await renderArgs({
+    eingabe: "in.mp4", ausgabe: path.join(ordner, "out.mp4"), quelle: { breite: 1920, hoehe: 1080, dauer: 5, hatTon: true },
+    e: { ...EINST, titelkarte: null, abspannAn: false, ton: { angleichen: false } }, schema: farbschema("weiss-schwarz-orange"), logo: null, ass: null, fontsDir: "/x", zeiten: ZEITEN, video: VIDEO,
+  });
+  assert.doesNotMatch(schlicht[schlicht.indexOf("-filter_complex") + 1], /loudnorm|afftdn|amix/);
+});
+
+test("Fremde Dateien: nur erlaubte Formate und Endungen", { skip: !ffmpeg && "ffmpeg fehlt" }, async () => {
+  assert.equal(sichereEndung("clip.MOV", "video"), ".mov");
+  assert.equal(sichereEndung("liste.m3u8", "video"), ".mp4");
+  assert.equal(sichereEndung("x.concat", "bild"), ".jpg");
+  assert.equal(sichereEndung(undefined, "ton"), ".mp3");
+  const ordner = fs.mkdtempSync(path.join(os.tmpdir(), "ppb-"));
+  // Playlists, die lokale Dateien einbinden wollen, als Video getarnt
+  const concat = path.join(ordner, "boese.mp4");
+  fs.writeFileSync(concat, "ffconcat version 1.0\nfile /etc/hostname\n");
+  await assert.rejects(untersuche(concat));
+  const hls = path.join(ordner, "boese2.mp4");
+  fs.writeFileSync(hls, "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10.0,\nfile:///etc/hostname\n#EXT-X-ENDLIST\n");
+  await assert.rejects(untersuche(hls));
+  await assert.rejects(fotoNormalisieren(concat, path.join(ordner, "x.png")));
+  await assert.rejects(tonUntersuchen(concat));
+  // Echte Musik geht
+  const mp3 = path.join(ordner, "musik.mp3");
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=d=3", mp3]);
+  assert.ok((await tonUntersuchen(mp3)).dauer > 2.5);
+});
+
+test("Video mit Musik und Tonbearbeitung wirklich bauen", { skip: !ffmpeg && "ffmpeg fehlt" }, async () => {
+  const ordner = fs.mkdtempSync(path.join(os.tmpdir(), "ppb-"));
+  const quelle = path.join(ordner, "q.mp4");
+  const musik = path.join(ordner, "m.mp3");
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=360x640:r=25:d=3", "-f", "lavfi", "-i", "sine=f=500:d=3", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", quelle]);
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=f=200:d=1.2", musik]); // kürzer als das Video → Schleife
+  const info = await untersuche(quelle);
+  const ausgabe = path.join(ordner, "fertig.mp4");
+  await rendern({
+    teile: [{ datei: quelle, quelle: info, von: 0, bis: 1.5, lautstaerke: 0.5 }, { datei: quelle, quelle: info, von: 2, bis: 3, stumm: true }],
+    ausgabe, e: { ...EINST, titelkarte: null, abspannAn: false, ton: { rauschen: true, angleichen: true, musik: { datei: musik, lautstaerke: 0.4, ducking: true, ab: 0.2 } } },
+    schema: farbschema("weiss-schwarz-orange"), logo: null, ass: null, fontsDir: path.dirname(ppicng.schriften.fett), zeiten: ZEITEN, video: VIDEO,
+  });
+  const fertig = await untersuche(ausgabe);
+  assert.ok(Math.abs(fertig.dauer - 2.5) < 0.2, `Dauer ${fertig.dauer}`);
+  assert.ok(fertig.hatTon);
+});
+
+test("Übergänge: xfade/acrossfade zwischen Teilen, harte Schnitte dazwischen", () => {
+  const hoch = { breite: 720, hoehe: 1280, hatTon: true };
+  const graph = schnittFilter([
+    { datei: "a.mp4", quelle: hoch, von: 0, bis: 3 },
+    { datei: "a.mp4", quelle: hoch, von: 4, bis: 6, uebergang: { art: "blende", dauer: 0.5 } },
+    { datei: "b.mp4", quelle: hoch, von: 0, bis: 2 },
+    { datei: "b.mp4", quelle: hoch, von: 3, bis: 5, uebergang: { art: "schwarz", dauer: 1 } },
+  ], { breite: 1080, hoehe: 1920 }, "rand").filter.join(";");
+  assert.match(graph, /\[tv0\]\[tv1\]xfade=transition=fade:duration=0\.5:offset=2\.500\[xv1\]/);
+  assert.match(graph, /\[ta0\]\[ta1\]acrossfade=d=0\.5/);
+  assert.match(graph, /\[xv1\]\[tv2\]concat=n=2:v=1:a=0\[xv2\]/); // harter Schnitt
+  // offset = 3 + 2 - 0,5 + 2 - 1 = 5,5
+  assert.match(graph, /\[xv2\]\[tv3\]xfade=transition=fadeblack:duration=1:offset=5\.500\[flaeche\]/);
+  assert.match(graph, /acrossfade=d=1:c1=tri:c2=tri\[geschnitten\]/);
+});
+
+test("Video mit Übergängen wirklich bauen", { skip: !ffmpeg && "ffmpeg fehlt" }, async () => {
+  const ordner = fs.mkdtempSync(path.join(os.tmpdir(), "ppb-"));
+  const a = path.join(ordner, "a.mp4");
+  const b = path.join(ordner, "b.mp4");
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=360x640:r=25:d=3", "-f", "lavfi", "-i", "sine=d=3", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", a]);
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc=s=640x360:r=30:d=3", "-c:v", "libx264", "-preset", "ultrafast", b]); // ohne Ton
+  const qa = await untersuche(a);
+  const qb = await untersuche(b);
+  const ausgabe = path.join(ordner, "fertig.mp4");
+  await rendern({
+    teile: [
+      { datei: a, quelle: qa, von: 0, bis: 2 },
+      { datei: b, quelle: qb, von: 0, bis: 2, uebergang: { art: "wischen", dauer: 0.5 } },
+      { datei: a, quelle: qa, von: 1, bis: 3, uebergang: { art: "blende", dauer: 1 } },
+    ],
+    ausgabe, e: { ...EINST, titelkarte: null, abspannAn: false, bauchbindeAn: true }, schema: farbschema("weiss-schwarz-orange"), logo: logoNachId(ppicng, "common/piraten"),
+    ass: null, fontsDir: path.dirname(ppicng.schriften.fett), zeiten: ZEITEN, video: VIDEO,
+  });
+  const fertig = await untersuche(ausgabe);
+  assert.ok(Math.abs(fertig.dauer - 4.5) < 0.2, `Dauer ${fertig.dauer}`); // 2 + 2 + 2 − 0,5 − 1
   assert.ok(fertig.hatTon);
 });

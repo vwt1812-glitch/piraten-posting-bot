@@ -33,7 +33,7 @@ test("Web-Version über die API", { skip: !ffmpeg && "ffmpeg fehlt", timeout: 18
   bot = spawn(process.execPath, ["src/bot.mjs"], {
     cwd: new URL("..", import.meta.url).pathname,
     env: {
-      PATH: process.env.PATH, WEB_PORT: String(port), WEB_PASSWORT: "geheim", DATEN_DIR: path.join(ordner, "daten"),
+      PATH: process.env.PATH, WEB_PORT: String(port), WEB_PASSWORT: "segel-setzen-ahoi", DATEN_DIR: path.join(ordner, "daten"),
       CHATS: path.join(ordner, "x.json"), VIDEO_PRESET: "ultrafast", VIDEO_FORMAT: "9:16", GESICHT_PYTHON: "/gibt/es/nicht",
     },
   });
@@ -63,8 +63,8 @@ test("Web-Version über die API", { skip: !ffmpeg && "ffmpeg fehlt", timeout: 18
   // Ohne Anmeldung nichts
   assert.equal((await api("optionen")).status, 401);
   assert.equal((await api("anmelden", { methode: "POST", json: { passwort: "falsch" } })).status, 401);
-  assert.equal((await api("anmelden", { methode: "POST", json: { passwort: "geheim" }, ohneKopf: true })).status, 403);
-  const anmeldung = await api("anmelden", { methode: "POST", json: { passwort: "geheim", nutzer: "Anja" } });
+  assert.equal((await api("anmelden", { methode: "POST", json: { passwort: "segel-setzen-ahoi" }, ohneKopf: true })).status, 403);
+  const anmeldung = await api("anmelden", { methode: "POST", json: { passwort: "segel-setzen-ahoi", nutzer: "Anja" } });
   assert.equal(anmeldung.status, 200);
   cookie = anmeldung.headers.get("set-cookie").split(";")[0];
   assert.match(anmeldung.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
@@ -89,7 +89,7 @@ test("Web-Version über die API", { skip: !ffmpeg && "ffmpeg fehlt", timeout: 18
   assert.equal((await api(`auftrag/${sp.id}/posten`, { methode: "POST", json: {} })).status, 403);
 
   // Fremde sehen den Beitrag nicht
-  const fremd = await api("anmelden", { methode: "POST", json: { passwort: "geheim", nutzer: "Bob" } });
+  const fremd = await api("anmelden", { methode: "POST", json: { passwort: "segel-setzen-ahoi", nutzer: "Bob" }, mitCookie: "" }); // eigener Browser
   const fremdCookie = fremd.headers.get("set-cookie").split(";")[0];
   assert.equal((await api(`auftrag/${sp.id}`, { mitCookie: fremdCookie })).status, 404);
 
@@ -135,11 +135,12 @@ test("Web-Version über die API", { skip: !ffmpeg && "ffmpeg fehlt", timeout: 18
   assert.equal((await api(`auftrag/${video.id}/clip/c2/arbeitskopie`)).headers.get("content-type"), "video/mp4");
   assert.equal((await api(`auftrag/${video.id}/speichern`, { methode: "POST", json: { schnitt: [] } })).status, 400);
   const geschnitten = await (await api(`auftrag/${video.id}/speichern`, { methode: "POST", json: {
-    schnitt: [{ clip: "c2", von: 0.5, bis: 1.5 }, { clip: "c1", von: 0, bis: 0.5 }, { clip: "c9", von: 0, bis: 1 }],
+    schnitt: [{ clip: "c2", von: 0.5, bis: 1.5, lautstaerke: 0.5 }, { clip: "c1", von: 0, bis: 0.5, uebergang: { art: "blende", dauer: 0.2 } }, { clip: "c9", von: 0, bis: 1 }],
     untertitel: [{ clip: "c2", start: 600, end: 1400, text: "Erster Teil" }, { clip: "c1", start: 1000, end: 1900, text: "herausgeschnitten" }],
   } })).json();
-  assert.deepEqual(geschnitten.schnitt, [{ clip: "c2", von: 0.5, bis: 1.5 }, { clip: "c1", von: 0, bis: 0.5 }]);
-  assert.match(geschnitten.srt, /00:00:00,100 --> 00:00:00,900\nErster Teil/);
+  assert.deepEqual(geschnitten.schnitt, [{ clip: "c2", von: 0.5, bis: 1.5, lautstaerke: 0.5 }, { clip: "c1", von: 0, bis: 0.5, uebergang: { art: "blende", dauer: 0.2 } }]);
+  // Der Untertitel endet, wo die Blende in den nächsten Teil beginnt
+  assert.match(geschnitten.srt, /00:00:00,100 --> 00:00:00,800\nErster Teil/);
   assert.doesNotMatch(geschnitten.srt, /herausgeschnitten/);
   assert.equal(geschnitten.geaendert, true);
   await api(`auftrag/${video.id}/bauen`, { methode: "POST", json: { e: { titelkarte: null, untertitel: true } } });
@@ -151,7 +152,7 @@ test("Web-Version über die API", { skip: !ffmpeg && "ffmpeg fehlt", timeout: 18
   const fertig = path.join(ordner, "geschnitten.mp4");
   fs.writeFileSync(fertig, Buffer.from(await (await api(`auftrag/${video.id}/datei`)).arrayBuffer()));
   const dauer = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", fertig]).toString());
-  assert.ok(Math.abs(dauer - 1.5) < 0.15, `Dauer ${dauer}`);
+  assert.ok(Math.abs(dauer - 1.3) < 0.15, `Dauer ${dauer}`); // 1 + 0,5 − 0,2 Blende
   // Standbild an einer Stelle des Schnitts
   assert.equal((await api(`auftrag/${video.id}/vorschau`, { methode: "POST", json: { zeit: 1.2 } })).headers.get("content-type"), "image/jpeg");
   // Clip entfernen

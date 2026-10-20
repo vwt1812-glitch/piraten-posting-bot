@@ -70,7 +70,7 @@ export function istErlaubt(liste, nutzer, raum) {
   });
 }
 
-const MEDIEN = { "m.video": "video", "m.image": "foto", "m.file": "datei" };
+const MEDIEN = { "m.video": "video", "m.image": "foto", "m.audio": "ton", "m.file": "datei" };
 
 /**
  * Timeline-Event → Ereignis des Bots. `menues`: eventId → {daten: string[]}, `letztes`: Raum → eventId.
@@ -92,7 +92,7 @@ export function ereignisAus(ev, raum, { ich, menues, letztes }) {
   const art = MEDIEN[c.msgtype];
   if (art) {
     const mime = c.info?.mimetype ?? "";
-    const echteArt = art === "datei" ? (mime.startsWith("video/") ? "video" : mime.startsWith("image/") ? "foto" : "datei") : art;
+    const echteArt = art === "datei" ? (mime.startsWith("video/") ? "video" : mime.startsWith("image/") ? "foto" : mime.startsWith("audio/") ? "ton" : "datei") : art;
     if (!c.url && c.file) return { ...basis, typ: "verschluesselt" };
     const name = c.filename ?? c.body ?? "datei";
     // Bildunterschrift (MSC2530): body ist der Text, filename der Dateiname

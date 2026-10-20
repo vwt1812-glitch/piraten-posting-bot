@@ -164,7 +164,7 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
       ABSPANN_DAUER: "1",
       WEB_PORT: "0",
       WEB_URL: "https://posting.example.de",
-      WEB_PASSWORT: "geheim",
+      WEB_PASSWORT: "segel-setzen-ahoi",
       GESICHT_PYTHON: "/gibt/es/nicht",
     },
   });
@@ -234,7 +234,7 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   tgNachricht({ document: { file_id: "F2", file_name: "quelle.mp4", mime_type: "video/mp4", file_size: 1000 } });
   const menu2 = await warteAuf(() => anrufe.slice(i).find((a) => a.methode === "sendMessage" && a.daten.reply_markup), "Hauptmenü zweites Video");
   const [, id2, schluessel] = menu2.daten.reply_markup.inline_keyboard.flat().find((k) => k.url).url.match(/uebernehmen\/(\w+)\/(\w+)$/);
-  const login = await fetch(`${webBasis}/api/anmelden`, { method: "POST", headers: { "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ passwort: "geheim", nutzer: "Anja" }) });
+  const login = await fetch(`${webBasis}/api/anmelden`, { method: "POST", headers: { "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ passwort: "segel-setzen-ahoi", nutzer: "Anja" }) });
   const cookie = login.headers.get("set-cookie").split(";")[0];
   const ueber = (s) => fetch(`${webBasis}/api/uebernehmen`, { method: "POST", headers: { Cookie: cookie, "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ id: id2, schluessel: s }) });
   assert.equal((await ueber("0".repeat(32))).status, 404);
