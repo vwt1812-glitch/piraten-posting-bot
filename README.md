@@ -289,9 +289,11 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 
 ## Gestaltung im Video
 
-- **Logo-Plakette** oben links (`LOGO_POSITION`), Logo auf einer Fläche in der Hintergrundfarbe des Designs mit der
-  farbigen Linie darunter – wie die Linie unter dem Claim in ppicng. `LOGO_STIL=frei` setzt nur das helle Logo mit
-  Schatten. Hochkant beginnt sie bei 14 % der Höhe, frei von den Reitern von Reels und TikTok.
+- **Logo** oben links (`LOGO_POSITION`), standardmäßig ohne Fläche (`LOGO_STIL=auto`): Der Bot misst, wie hell
+  das Bild hinter dem Logo ist, und nimmt auf hellem Grund (weiße Wand) das dunkle Logo mit hellem Schein, sonst
+  das helle mit Schatten. `plakette` setzt es auf eine kleine, abgerundete Fläche im Design mit der farbigen Linie
+  darunter (wie unter dem Claim in ppicng), `frei` immer hell mit Schatten. Umschaltbar im Bot unter 🏴‍☠️ Logo →
+  ✨ Stil und im Browser. Hochkant beginnt das Logo bei 14 % der Höhe, frei von den Reitern von Reels und TikTok.
 - **Untertitel** in DejaRip Bold auf einer Fläche im Design (`UNTERTITEL_STIL=box`) oder weiß mit Kontur (`rand`),
   einzeilig in kurzen Häppchen; hochkant über Name und Caption der Apps, pro Video unten/Mitte/oben.
 - **Bauchbinde**: Name in Politics Head mit Linie, Funktion in DejaRip; gleitet nach `BAUCHBINDE_START` Sekunden

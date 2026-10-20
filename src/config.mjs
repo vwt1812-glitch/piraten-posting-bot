@@ -156,7 +156,7 @@ export function ladeConfig() {
     standard: {
       design: env("DESIGN", "weiss-schwarz-orange"),
       logo: env("LOGO", "common/piraten"),
-      logoStil: env("LOGO_STIL", "plakette"),
+      logoStil: env("LOGO_STIL", "auto"),
       logoPosition: env("LOGO_POSITION", "oben-links"),
       logoBreite: Number(env("LOGO_BREITE", "0.36")),
       format: env("VIDEO_FORMAT", "original"),

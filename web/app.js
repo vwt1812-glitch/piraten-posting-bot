@@ -879,7 +879,7 @@ async function editor(id) {
       el("div", { class: "reihe" },
         el("button", { type: "button", class: "zweit klein", onclick: () => { setze("logo", "kein"); aktualisieren(); } }, "Ohne Logo")),
       ...(istVideo || e.bildStil === "logo" ? [
-        ...auswahl("logoStil", [["plakette", "Auf Fläche im Design (Plakette)"], ["frei", "Frei, helles Logo mit Schatten"]], "Logo-Stil"),
+        ...auswahl("logoStil", [["auto", "Ohne Fläche, Farbe passend zum Bild"], ["plakette", "Auf Fläche im Design (Plakette)"], ["frei", "Ohne Fläche, immer hell mit Schatten"]], "Logo-Stil"),
         ...auswahl("logoPosition", [["oben-links", "oben links"], ["oben-rechts", "oben rechts"], ["unten-links", "unten links"], ["unten-rechts", "unten rechts"]], "Position"),
       ] : []),
     ];

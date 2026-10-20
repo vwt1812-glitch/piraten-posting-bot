@@ -95,7 +95,7 @@ export function bereinigen(neu, alt, ppicng) {
   if (!neu || typeof neu !== "object") return e;
   e.design = aus(neu.design, Object.keys(FARBSCHEMATA), alt.design);
   if (typeof neu.logo === "string" && (neu.logo === "kein" || logoNachId(ppicng, neu.logo))) e.logo = neu.logo;
-  e.logoStil = aus(neu.logoStil, ["plakette", "frei"], alt.logoStil);
+  e.logoStil = aus(neu.logoStil, ["auto", "plakette", "frei"], alt.logoStil);
   e.logoPosition = aus(neu.logoPosition, ["oben-links", "oben-rechts", "unten-links", "unten-rechts"], alt.logoPosition);
   e.format = aus(neu.format, Object.keys(FORMATE), alt.format);
   e.sharepicFormat = aus(neu.sharepicFormat, SHAREPIC_FORMATE, alt.sharepicFormat);

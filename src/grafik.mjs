@@ -219,27 +219,36 @@ export async function sharepic({ breite, hoehe, schema, claim, text = "", logo =
 }
 
 /**
- * Logo für Videos. „plakette“: auf einer Fläche im Farbschema mit Linie unten (wie die Claim-Linie),
- * „frei“: nur das Logo mit heller Schrift und weichem Schatten.
+ * Logo für Videos und Fotos.
+ * „auto“: ohne Fläche, die Farbe richtet sich nach dem Hintergrund – auf hellem (`hell`) das dunkle Logo mit
+ * hellem Schein, sonst das helle mit Schatten. „frei“: immer das helle Logo mit Schatten.
+ * „plakette“: kompakte, abgerundete Fläche im Farbschema mit Linie unten (wie die Claim-Linie).
+ * Bei „auto“ sind die Maße unabhängig von `hell` – die Lage lässt sich also vorher berechnen.
  * @param {number} logoBreite Breite des Logos in Pixeln
  * @returns {Promise<{png:Buffer, breite:number, hoehe:number}>}
  */
-export async function logoPlakette({ logo, schema, logoBreite, stil = "plakette" }) {
-  const frei = stil === "frei";
-  const bild = await ladeBild(logoDatei(logo, frei ? "#ffffff" : schema.schrift));
+export async function logoPlakette({ logo, schema, logoBreite, stil = "auto", hell = false }) {
+  const frei = stil !== "plakette";
+  const dunkel = stil === "auto" && hell;
+  const bild = await ladeBild(logoDatei(logo, frei ? (dunkel ? "#000000" : "#ffffff") : schema.schrift));
   const lw = Math.round(logoBreite);
   const lh = Math.round((lw * bild.height) / bild.width);
-  // Die Logo-PNGs aus ppicng haben selbst schon etwas Luft um das Logo
-  const innen = frei ? Math.round(lw * 0.04) : Math.round(lw * 0.035);
-  const linie = frei ? 0 : Math.max(2, Math.round(lw * 0.025));
+  // Die Logo-PNGs aus ppicng haben selbst schon Luft um das Logo – die Plakette braucht kaum eigenen Rand
+  const innen = frei ? Math.round(lw * 0.04) : Math.round(lw * 0.012);
+  const linie = frei ? 0 : Math.max(2, Math.round(lw * 0.02));
   const breite = gerade(lw + 2 * innen);
   const hoehe = gerade(lh + 2 * innen + linie);
   const canvas = createCanvas(breite, hoehe);
   const ctx = canvas.getContext("2d");
   if (frei) {
-    ctx.shadowColor = "rgba(0,0,0,0.55)";
+    ctx.shadowColor = dunkel ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.55)";
     ctx.shadowBlur = innen * 0.8;
+    // Der helle Schein braucht zwei Lagen, um auf unruhigem Grund zu tragen
+    if (dunkel) ctx.drawImage(bild, innen, innen, lw, lh);
   } else {
+    ctx.beginPath();
+    ctx.roundRect(0, 0, breite, hoehe, Math.round(lw * 0.04));
+    ctx.clip();
     ctx.fillStyle = schema.hintergrund;
     ctx.fillRect(0, 0, breite, hoehe);
     ctx.fillStyle = schema.linie;
@@ -247,6 +256,17 @@ export async function logoPlakette({ logo, schema, logoBreite, stil = "plakette"
   }
   ctx.drawImage(bild, innen, innen, lw, lh);
   return { png: await canvas.encode("png"), breite, hoehe };
+}
+
+/** Ab dieser mittleren Helligkeit (0–255) gilt der Grund hinter dem Logo als hell. */
+export const HELL_AB = 150;
+
+/** Mittlere Helligkeit eines Bereichs auf einer Canvas (Rec. 601). */
+export function helligkeit(ctx, { x, y, breite, hoehe }) {
+  const d = ctx.getImageData(Math.max(0, Math.round(x)), Math.max(0, Math.round(y)), Math.max(1, Math.round(breite)), Math.max(1, Math.round(hoehe))).data;
+  let summe = 0;
+  for (let i = 0; i < d.length; i += 4) summe += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  return summe / (d.length / 4);
 }
 
 /**
@@ -317,14 +337,16 @@ export async function eigenesBild({ breite, hoehe, bild, schema }) {
   return canvas.encode("png");
 }
 
-/** Foto auf die Fläche (füllend, mittig beschnitten) mit Logo-Plakette. */
+/** Foto auf die Fläche (füllend, mittig beschnitten) mit Logo. */
 export async function fotoMitLogo({ breite, hoehe, bild, logo, schema, logoBreite, stil, position }) {
   const canvas = createCanvas(breite, hoehe);
   const ctx = canvas.getContext("2d");
   zeichneBild(ctx, await ladeBild(bild), { x: 0, y: 0, breite, hoehe, art: "fill" });
   if (logo) {
-    const g = await logoPlakette({ logo, schema, logoBreite: Math.min(breite, hoehe) * logoBreite, stil });
+    const o = { logo, schema, logoBreite: Math.min(breite, hoehe) * logoBreite, stil };
+    let g = await logoPlakette(o);
     const { x, y } = logoLage({ masse: { breite, hoehe }, grafik: g, position, video: false });
+    if (stil === "auto" && helligkeit(ctx, { x, y, breite: g.breite, hoehe: g.hoehe }) >= HELL_AB) g = await logoPlakette({ ...o, hell: true });
     ctx.drawImage(await loadImage(g.png), x, y);
   }
   return canvas.encode("png");

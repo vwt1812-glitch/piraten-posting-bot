@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { untertitelGroesse, untertitelPosition } from "./untertitel.mjs";
 import { UEBERGAENGE, schnittDauer } from "./schnitt.mjs";
-import { sharepic, logoPlakette, bauchbinde, eigenesBild, gerade, raender, logoLage } from "./grafik.mjs";
+import { sharepic, logoPlakette, bauchbinde, eigenesBild, gerade, raender, logoLage, HELL_AB } from "./grafik.mjs";
 
 export { raender, logoLage };
 
@@ -248,6 +248,29 @@ export function bauchbindeLage({ masse, grafik, untertitel, lage }) {
 
 // ---------- Rendern ----------
 
+const helligkeiten = new Map();
+
+/**
+ * Mittlere Helligkeit (0–255) eines Bereichs im fertig gesetzten Bild – ein Bild je Sekunde aus den ersten
+ * 30 Sekunden. Für das Logo „auto“: Standbild und fertiges Video kommen so zum selben Ergebnis, und weitere
+ * Vorschauen kosten nichts mehr (gemerkt je Schnitt, Format und Bereich).
+ */
+export async function bereichHelligkeit({ teile, masse, anpassen, x, y, breite, hoehe }) {
+  const schluessel = JSON.stringify([teile.map((t) => [t.datei, t.von, t.bis]), masse, anpassen, x, y, breite, hoehe]);
+  if (helligkeiten.has(schluessel)) return helligkeiten.get(schluessel);
+  const schnitt = schnittFilter(teile, masse, anpassen, { mitTon: false });
+  const args = ["-v", "error"];
+  for (const d of schnitt.eingaben) args.push(...eingang(d));
+  const w = Math.max(2, Math.min(breite, masse.breite - x)), h = Math.max(2, Math.min(hoehe, masse.hoehe - y));
+  const filter = [...schnitt.filter, `[${schnitt.video}]fps=1,crop=${w}:${h}:${x}:${y},scale=1:1:flags=area,format=gray[hell]`];
+  args.push("-filter_complex", filter.join(";"), "-map", "[hell]", "-t", "30", "-f", "rawvideo", "pipe:1");
+  const roh = await ausfuehren("ffmpeg", args, { binaer: true });
+  const wert = roh.length ? roh.reduce((a, b) => a + b, 0) / roh.length : 0;
+  if (helligkeiten.size > 200) helligkeiten.delete(helligkeiten.keys().next().value);
+  helligkeiten.set(schluessel, wert);
+  return wert;
+}
+
 /**
  * Grafiken für ein Video erzeugen und die ffmpeg-Argumente bauen.
  * @param {object} o
@@ -291,8 +314,8 @@ export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, l
   }
 
   if (logo) {
-    const g = await logoPlakette({ logo, schema, logoBreite: Math.min(masse.breite, masse.hoehe) * e.logoBreite, stil: e.logoStil });
-    const i = await bild("logo.png", g.png);
+    const o = { logo, schema, logoBreite: Math.min(masse.breite, masse.hoehe) * e.logoBreite, stil: e.logoStil };
+    let g = await logoPlakette(o);
     let { x, y } = logoLage({ masse, grafik: g, position: e.logoPosition });
     // Querformat auf 9:16: Logo mittig über dem Bild, wenn darüber Platz ist (unter der Kopfzeile der Apps)
     const ueberBild = band ? band.oben - Math.round(Math.min(masse.breite, masse.hoehe) * 0.045) - g.hoehe : -1;
@@ -300,6 +323,12 @@ export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, l
       x = Math.round((masse.breite - g.breite) / 2);
       y = ueberBild;
     }
+    // „auto“: Ist der Grund hinter dem Logo hell, kommt das dunkle Logo (Maße bleiben gleich)
+    if (o.stil === "auto") {
+      const wert = await bereichHelligkeit({ teile, masse, anpassen: e.anpassen, x, y, breite: g.breite, hoehe: g.hoehe }).catch(() => 0);
+      if (wert >= HELL_AB) g = await logoPlakette({ ...o, hell: true });
+    }
+    const i = await bild("logo.png", g.png);
     filter.push(`[${letzte}][${i}:v]overlay=${x}:${y}:format=auto[mitlogo]`);
     letzte = "mitlogo";
   }

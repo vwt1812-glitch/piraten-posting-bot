@@ -220,3 +220,35 @@ test("Video mit Übergängen wirklich bauen", { skip: !ffmpeg && "ffmpeg fehlt" 
   assert.ok(Math.abs(fertig.dauer - 4.5) < 0.2, `Dauer ${fertig.dauer}`); // 2 + 2 + 2 − 0,5 − 1
   assert.ok(fertig.hatTon);
 });
+
+test("Logo „auto“: auf hellem Grund dunkel, auf dunklem hell", { skip: !ffmpeg && "ffmpeg fehlt" }, async () => {
+  const { loadImage, createCanvas } = await import("@napi-rs/canvas");
+  const ordner = fs.mkdtempSync(path.join(os.tmpdir(), "ppb-logo-"));
+  const ergebnis = {};
+  for (const [name, farbe] of [["hell", "0xEDE6DC"], ["dunkel", "0x202428"]]) {
+    const ein = path.join(ordner, `${name}.mp4`);
+    execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", `color=c=${farbe}:s=640x360:d=2`, "-pix_fmt", "yuv420p", ein]);
+    const quelle = await untersuche(ein);
+    const aus = path.join(ordner, `${name}.jpg`);
+    const { args } = await renderArgs({
+      eingabe: ein, quelle, ausgabe: aus, standbild: 1, ass: null, fontsDir: "/x", zeiten: ZEITEN, video: VIDEO,
+      e: { ...EINST, format: "original", logoStil: "auto", bauchbindeAn: false, titelkarte: null, abspannAn: false },
+      schema: farbschema("weiss-schwarz-orange"), logo: logoNachId(ppicng, "laender/bayern"),
+    });
+    execFileSync("ffmpeg", args, { cwd: ordner });
+    // Schrift „PIRATENPARTEI“ rechts vom Signet: dunkelster bzw. hellster Punkt dort
+    const bild = await loadImage(fs.readFileSync(aus));
+    const ctx = createCanvas(bild.width, bild.height).getContext("2d");
+    ctx.drawImage(bild, 0, 0);
+    const d = ctx.getImageData(70, 25, 70, 30).data;
+    let min = 255, max = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      min = Math.min(min, l);
+      max = Math.max(max, l);
+    }
+    ergebnis[name] = { min, max };
+  }
+  assert.ok(ergebnis.hell.min < 80, `heller Grund, dunkle Schrift: ${JSON.stringify(ergebnis.hell)}`);
+  assert.ok(ergebnis.dunkel.max > 200, `dunkler Grund, helle Schrift: ${JSON.stringify(ergebnis.dunkel)}`);
+});

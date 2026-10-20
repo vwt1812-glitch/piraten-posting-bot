@@ -294,6 +294,13 @@ async function knopf(ereignis) {
       return menuZeigen(a, M.logoMenu(a, ctx));
     case "l":
       return aendern({ logo: wertRest });
+    case "ls": {
+      // auto → plakette → frei → auto
+      const stile = Object.keys(M.LOGO_STIL_TEXT);
+      e.logoStil = stile[(stile.indexOf(e.logoStil) + 1) % stile.length];
+      auftraege.aendern(a.id, { e, geaendert: true });
+      return menuZeigen(a, M.logoMenu(a, ctx));
+    }
     case "format":
       return menuZeigen(a, M.formatMenu(a));
     case "f":

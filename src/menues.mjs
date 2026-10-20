@@ -120,6 +120,8 @@ export function designMenu(a) {
   };
 }
 
+export const LOGO_STIL_TEXT = { auto: "ohne Fläche, passend zum Bild", plakette: "auf Fläche (Plakette)", frei: "ohne Fläche, immer hell" };
+
 export function logoMenu(a, ctx, treffer = null, suche = "") {
   const knoepfe = [];
   let text;
@@ -134,7 +136,10 @@ export function logoMenu(a, ctx, treffer = null, suche = "") {
   }
   const standard = ctx.standardLogo;
   if (standard && standard !== a.e.logo) knoepfe.push([k(a, "l", `↩️ Standard: ${logoTitel(ctx.ppicng, standard)}`, standard)]);
-  if (a.e.logo !== "kein") knoepfe.push([k(a, "l", "🚫 Ohne Logo", "kein")]);
+  if (a.e.logo !== "kein") {
+    knoepfe.push([k(a, "ls", `✨ Stil: ${LOGO_STIL_TEXT[a.e.logoStil] ?? LOGO_STIL_TEXT.auto}`)]);
+    knoepfe.push([k(a, "l", "🚫 Ohne Logo", "kein")]);
+  }
   knoepfe.push(zurueck(a));
   return { text, knoepfe };
 }

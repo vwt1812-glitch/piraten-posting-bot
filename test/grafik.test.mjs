@@ -33,7 +33,8 @@ async function pixel(png, x, y) {
   const c = createCanvas(bild.width, bild.height);
   const ctx = c.getContext("2d");
   ctx.drawImage(bild, 0, 0);
-  return { breite: bild.width, hoehe: bild.height, farbe: [...ctx.getImageData(x, y, 1, 1).data.slice(0, 3)] };
+  const d = ctx.getImageData(x, y, 1, 1).data;
+  return { breite: bild.width, hoehe: bild.height, farbe: [...d.slice(0, 3)], alpha: d[3] };
 }
 
 test("Sharepic im classic-Layout: Größe, Hintergrund, orange Linie", async () => {
@@ -53,10 +54,16 @@ test("Sharepic im classic-Layout: Größe, Hintergrund, orange Linie", async () 
 });
 
 test("Logo-Plakette und Bauchbinde haben gerade Maße", async () => {
-  const p = await logoPlakette({ logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 389 });
+  const p = await logoPlakette({ logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 389, stil: "plakette" });
   assert.equal(p.breite % 2, 0);
   assert.equal(p.hoehe % 2, 0);
-  assert.equal((await pixel(p.png, 1, p.hoehe - 1)).farbe.join(), "255,136,0");
+  assert.equal((await pixel(p.png, p.breite / 2, p.hoehe - 1)).farbe.join(), "255,136,0");
+  assert.equal((await pixel(p.png, 0, 0)).alpha, 0); // abgerundete Ecke
+  // „auto“: hell und dunkel gleich groß, damit die Lage vorher feststeht
+  const hell = await logoPlakette({ logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 389, hell: true });
+  const dunkel = await logoPlakette({ logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 389 });
+  assert.deepEqual([hell.breite, hell.hoehe], [dunkel.breite, dunkel.hoehe]);
+  assert.notDeepEqual(hell.png, dunkel.png);
   const b = await bauchbinde({ name: "Ein sehr langer Name, der nicht passt", funktion: "Funktion", schema: farbschema("schwarz-weiss-orange"), einheit: 80, maxBreite: 600 });
   assert.ok(b.breite <= 600);
   assert.equal(b.breite % 2, 0);
@@ -84,9 +91,9 @@ test("SVG-Logos aus ppicng werden nicht schwarz gemalt", async () => {
 
 test("Foto mit Logo und eigenes Bild", async () => {
   const foto = new URL("../ppicng/src/designs/gp2024/backgrounds/papagei.png", import.meta.url).pathname;
-  const a = await fotoMitLogo({ breite: 1080, hoehe: 1080, bild: foto, logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 0.36, position: "oben-links" });
+  const a = await fotoMitLogo({ breite: 1080, hoehe: 1080, bild: foto, logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 0.36, position: "oben-links", stil: "plakette" });
   const { x, y } = logoLage({ masse: { breite: 1080, hoehe: 1080 }, grafik: { breite: 10, hoehe: 10 }, video: false });
-  assert.deepEqual((await pixel(a, x + 2, y + 2)).farbe, [255, 255, 255]);
+  assert.deepEqual((await pixel(a, x + 30, y + 2)).farbe, [255, 255, 255]); // neben der abgerundeten Ecke
   const b = await eigenesBild({ breite: 1080, hoehe: 1920, bild: foto, schema: farbschema("schwarz-weiss-orange") });
   assert.deepEqual((await pixel(b, 5, 5)).farbe, [0, 0, 0]);
 });
