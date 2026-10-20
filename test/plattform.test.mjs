@@ -63,3 +63,20 @@ test("Matrix: Ereignisse aus der Timeline", () => {
   assert.equal(matrixEreignis(msg({ msgtype: "m.text", body: "* neu", "m.relates_to": { rel_type: "m.replace" } }), "!r", z), null);
   assert.equal(ohneZitat("> <@a:b> alt\n> zeile\n\nneu"), "neu");
 });
+
+test("Matrix-Server des Bots: Pflicht, nur https, sonst aus der Matrix-ID", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const lauf = (env) => spawnSync(process.execPath, ["-e", "import('./src/config.mjs').then((m) => console.log(JSON.stringify(m.ladeConfig().matrix)))"], {
+    cwd: new URL("..", import.meta.url).pathname,
+    env: { PATH: process.env.PATH, CHATS: "/gibt/es/nicht.json", ...env },
+    encoding: "utf8",
+  });
+  const ohne = lauf({ MATRIX_TOKEN: "t" });
+  assert.match(ohne.stderr, /MATRIX_URL fehlt/);
+  assert.match(lauf({ MATRIX_TOKEN: "t", MATRIX_URL: "http://matrix.example.org" }).stderr, /muss mit https:\/\//);
+  const aus = JSON.parse(lauf({ MATRIX_NUTZER: "@posting-bot:matrix.org", MATRIX_PASSWORT: "p" }).stdout);
+  assert.equal(aus.url, "");
+  assert.equal(aus.server, "matrix.org");
+  const warnung = lauf({ MATRIX_TOKEN: "t", MATRIX_URL: "https://matrix.org", MATRIX_ERLAUBT: "*:matrix.org" });
+  assert.match(warnung.stderr, /öffentlichen Server/);
+});

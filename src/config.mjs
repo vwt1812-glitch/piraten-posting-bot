@@ -53,13 +53,26 @@ function matrixConfig() {
   const nutzer = env("MATRIX_NUTZER");
   if (!token && !nutzer) return null;
   if (!token && !env("MATRIX_PASSWORT")) throw new Error("MATRIX_NUTZER braucht MATRIX_PASSWORT (oder MATRIX_TOKEN eintragen).");
+  // Der Server des Bot-Kontos – nicht der Server der Leute: Über die Föderation kann der Bot trotzdem in Räume
+  // auf matrix.piratenpartei.de eingeladen werden. Ohne MATRIX_URL ergibt er sich aus MATRIX_NUTZER (@bot:server).
+  const url = env("MATRIX_URL", "").replace(/\/$/, "");
+  const server = /^@[^:]+:(.+)$/.exec(nutzer ?? "")?.[1];
+  if (!url && !server) throw new Error("MATRIX_URL fehlt – die Adresse des Servers, auf dem das Bot-Konto liegt (z. B. https://matrix.org), oder MATRIX_NUTZER als volle ID (@posting-bot:matrix.org).");
+  if (url && !/^https:\/\//.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)/.test(url)) {
+    throw new Error("MATRIX_URL muss mit https:// beginnen (nur pantalaimon o. Ä. auf demselben Rechner darf http://localhost sein).");
+  }
+  const erlaubt = liste("MATRIX_ERLAUBT");
+  for (const e of erlaubt.filter((e) => /^\*:(matrix\.org|tchncs\.de|envs\.net|mozilla\.org|kde\.org)$/i.test(e))) {
+    console.warn(`⚠️ MATRIX_ERLAUBT enthält ${e} – damit darf jede:r mit Konto auf diesem öffentlichen Server den Bot benutzen. Gemeint ist meist *:piratenpartei.de.`);
+  }
   return {
-    url: env("MATRIX_URL", "https://matrix.piratenpartei.de").replace(/\/$/, ""),
+    url,
+    server,
     token,
     nutzer,
     passwort: env("MATRIX_PASSWORT"),
     // Matrix-IDs (@name:server), Räume (!raum:server) oder ganze Server (*:piratenpartei.de)
-    erlaubt: liste("MATRIX_ERLAUBT"),
+    erlaubt,
     // Einladungen von erlaubten Personen automatisch annehmen
     einladungenAnnehmen: ja("MATRIX_EINLADUNGEN_ANNEHMEN", true),
   };
@@ -108,7 +121,8 @@ function webConfig() {
     // ist die Seite offen (Projekte gehören dann dem Browser), außer es ist trotzdem eine Anmeldung gesetzt.
     passwort: env("WEB_PASSWORT"),
     matrixAnmeldung: ja("WEB_MATRIX_ANMELDUNG", false),
-    matrixUrl: env("WEB_MATRIX_URL", env("MATRIX_URL", "https://matrix.piratenpartei.de")).replace(/\/$/, ""),
+    // Server der Leute, nicht der des Bots: angemeldet wird mit dem eigenen Piraten-Konto
+    matrixUrl: env("WEB_MATRIX_URL", "https://matrix.piratenpartei.de").replace(/\/$/, ""),
     // Wer sich mit Matrix anmelden darf: @name:server, *:server
     erlaubt: liste("WEB_ERLAUBT"),
     // Wer posten darf: ja (alle Angemeldeten), nein, oder Liste wie WEB_ERLAUBT

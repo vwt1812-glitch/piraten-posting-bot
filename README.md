@@ -1,7 +1,7 @@
 # Piraten-Posting-Bot
 
 Ein Bot für einheitliches Design bei der Piratenpartei – **auch für Videos**. Video oder Foto in **Telegram** oder
-**Matrix** (z. B. `matrix.piratenpartei.de`) reinschicken – oder in der **Web-Version** im Browser hochladen → es
+**Matrix** (auch aus Räumen auf `matrix.piratenpartei.de`) reinschicken – oder in der **Web-Version** im Browser hochladen → es
 entsteht im Design von [ppicng](https://github.com/Piratenpartei/ppicng) → Vorschau anpassen → als fertige Datei
 holen oder direkt über [Postiz](https://postiz.com) posten bzw. planen. Postiz ist optional.
 
@@ -196,14 +196,27 @@ Beide laufen gleichzeitig, wenn beide eingetragen sind; mindestens eins davon od
    [Bot-API-Server](https://github.com/tdlib/telegram-bot-api) betreiben und `TELEGRAM_API_URL` setzen (wie im
    [Stadtrat-Bot](https://github.com/vwt1812-glitch/stadtrat-social-bot#große-videos-über-20-mb) beschrieben).
 
-### Matrix (matrix.piratenpartei.de)
+### Matrix
 
-1. Ein eigenes Konto für den Bot anlegen, z. B. `@posting-bot:piratenpartei.de`.
-2. In `.env`: `MATRIX_URL=https://matrix.piratenpartei.de` und entweder `MATRIX_TOKEN` (Element → Einstellungen →
-   Hilfe & Info → Zugriffstoken) oder `MATRIX_NUTZER` + `MATRIX_PASSWORT` – dann meldet sich der Bot selbst an.
-3. `MATRIX_ERLAUBT`: Personen (`@anja:piratenpartei.de`), Räume (`!abc…:piratenpartei.de`) oder gleich alle auf
-   einem Server (`*:piratenpartei.de`). Einladungen von Erlaubten nimmt der Bot selbst an.
-4. Den Bot in einen Raum einladen oder direkt anschreiben.
+Auf matrix.piratenpartei.de kann man nicht einfach selbst Konten anlegen. Das Bot-Konto kommt deshalb auf einen
+anderen Server – etwa **matrix.org** (Registrierung offen, z. B. über [app.element.io](https://app.element.io)) oder
+einen eigenen. Über die Föderation lädt man den Bot trotzdem in Räume auf matrix.piratenpartei.de ein und
+schreibt ihm von dort; benutzen dürfen ihn weiterhin nur die Leute aus `MATRIX_ERLAUBT`.
+
+1. Ein Konto für den Bot anlegen, z. B. `@posting-bot:matrix.org`.
+2. In `.env`: `MATRIX_NUTZER=@posting-bot:matrix.org` + `MATRIX_PASSWORT` – der Bot findet den Server selbst
+   (`/.well-known/matrix/client`) und meldet sich an. Oder `MATRIX_URL=https://matrix-client.matrix.org` plus
+   `MATRIX_TOKEN` (Element → Einstellungen → Hilfe & Info → Zugriffstoken).
+3. `MATRIX_ERLAUBT`: die Leute, nicht der Server des Bots – Personen (`@anja:piratenpartei.de`), Räume
+   (`!abc…:piratenpartei.de`) oder alle auf einem Server (`*:piratenpartei.de`). **Nicht** `*:matrix.org`, sonst
+   darf jede:r mit Konto dort (der Bot warnt beim Start). Einladungen von Erlaubten nimmt der Bot selbst an.
+4. Den Bot in einen Raum einladen oder direkt anschreiben (Element: „Direktnachricht starten“ →
+   `@posting-bot:matrix.org`).
+
+**Föderation:** Der Raum darf nicht auf „Nur Mitglieder von piratenpartei.de“ stehen (diese Einstellung lässt sich
+nur beim Anlegen wählen) und keine Server-ACL haben, die den Server des Bots aussperrt. Sonst klappt der Beitritt
+nicht – der Bot schreibt das ins Log. Dann einen neuen Raum für den Bot anlegen. Videos und Bilder gehen über die
+Föderation hin und her; die Größengrenze für Uploads liest der Bot vom eigenen Server.
 
 Matrix kennt keine Knöpfe. Der Bot schreibt die Auswahl deshalb nummeriert unter seine Nachricht und setzt die
 Reaktionen **1️⃣ 2️⃣ 3️⃣ …** gleich selbst darunter – antippen genügt. Man kann auch einfach die Zahl schicken.
@@ -211,8 +224,9 @@ Ein neues Menü ersetzt das alte, damit der Raum übersichtlich bleibt. Befehle 
 (`!sharepic`, `!logo`, `!status`), weil Element `/…` als eigenen Befehl versteht.
 
 **Ratenlimit:** Synapse bremst Konten, die viele Nachrichten schnell hintereinander schicken – der Bot setzt pro
-Menü bis zu zehn Reaktionen. Er wartet dann selbst, schneller geht es, wenn die Admins von matrix.piratenpartei.de
-das Bot-Konto vom Limit ausnehmen (Admin-API `/_synapse/admin/v1/users/<id>/override_ratelimit`).
+Menü bis zu zehn Reaktionen. Er wartet dann selbst. Auf einem eigenen Server geht es schneller, wenn man das
+Bot-Konto vom Limit ausnimmt (Admin-API `/_synapse/admin/v1/users/<id>/override_ratelimit`); auf matrix.org geht
+das nicht, da dauert ein Menü mitunter ein paar Sekunden.
 
 **Verschlüsselung:** Der Bot liest keine Ende-zu-Ende-verschlüsselten Räume (und sagt das auch). Für den Bot einen
 unverschlüsselten Raum nehmen – bei neuen Räumen und Direktnachrichten in Element vor dem Anlegen

@@ -1,4 +1,5 @@
-// Matrix als Plattform (z. B. matrix.piratenpartei.de) über die Client-Server-API, ohne SDK:
+// Matrix als Plattform über die Client-Server-API, ohne SDK. Das Bot-Konto kann auf einem beliebigen Server liegen
+// (z. B. matrix.org) – über die Föderation lädt man es trotzdem in Räume auf matrix.piratenpartei.de ein.
 // https://spec.matrix.org/latest/client-server-api/
 //
 // Matrix kennt keine Knöpfe wie Telegram. Der Bot schreibt die Auswahl deshalb nummeriert unter die
@@ -70,6 +71,16 @@ export function istErlaubt(liste, nutzer, raum) {
   });
 }
 
+/** Adresse des Servers aus der Matrix-ID: /.well-known/matrix/client, sonst https://server. */
+export async function serverFinden(server) {
+  try {
+    const res = await fetch(`https://${server}/.well-known/matrix/client`, { signal: AbortSignal.timeout(10000) });
+    const url = res.ok ? (await res.json())?.["m.homeserver"]?.base_url : null;
+    if (typeof url === "string" && /^https:\/\//.test(url)) return url.replace(/\/$/, "");
+  } catch {}
+  return `https://${server}`;
+}
+
 const MEDIEN = { "m.video": "video", "m.image": "foto", "m.audio": "ton", "m.file": "datei" };
 
 /**
@@ -113,8 +124,9 @@ export function ereignisAus(ev, raum, { ich, menues, letztes }) {
 export class MatrixPlattform {
   name = "matrix";
 
-  constructor({ url, token, nutzer, passwort, erlaubt, einladungenAnnehmen }, datenDir) {
+  constructor({ url, server, token, nutzer, passwort, erlaubt, einladungenAnnehmen }, datenDir) {
     this.url = url;
+    this.server = server;
     this.token = token;
     this.nutzer = nutzer;
     this.passwort = passwort;
@@ -167,6 +179,7 @@ export class MatrixPlattform {
   }
 
   async verbinden() {
+    this.url ||= await serverFinden(this.server);
     this.token ||= this.zustand.token;
     if (!this.token) {
       const antwort = await this.anfrage("POST", "/_matrix/client/v3/login", {
@@ -247,7 +260,10 @@ export class MatrixPlattform {
         await this.anfrage("POST", `/_matrix/client/v3/join/${encodeURIComponent(raum)}`, {});
         await this.senden(raum, "Ahoi! 🏴‍☠️ Schick mir ein Video oder schreib <code>/sharepic Dein Claim</code>. Mit <code>/start</code> gibt’s die Hilfe.");
       } catch (e) {
-        console.error(`Matrix: Beitritt zu ${raum} fehlgeschlagen:`, e.message);
+        // Häufigster Grund bei Räumen auf anderen Servern: Raum nicht föderiert („Nur für Mitglieder von …“)
+        // oder der Server des Bots per Server-ACL ausgesperrt
+        const hinweis = e.status === 403 ? " – Raum anderer Server nicht föderiert oder Server-ACL? Siehe README „Matrix“." : "";
+        console.error(`Matrix: Beitritt zu ${raum} (eingeladen von ${von}) fehlgeschlagen:`, e.message + hinweis);
       }
     } else {
       await this.anfrage("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(raum)}/leave`, {}).catch(() => {});
