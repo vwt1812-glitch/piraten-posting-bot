@@ -1,0 +1,19 @@
+{
+  "_hinweis": "Eigene Voreinstellungen je Telegram-Chat oder Matrix-Raum. Schlüssel: Telegram-Chat-ID oder Matrix-Raum-ID (/id im Chat schicken). Alles ist optional, fehlende Werte kommen aus der .env.",
+  "-1001234567890": {
+    "name": "KV Nürnberg",
+    "logo": "lists/piratenxhumanisten",
+    "design": "weiss-schwarz-orange",
+    "bauchbinde": { "name": "Lukas Küffner", "funktion": "Stadtrat in Nürnberg" },
+    "absender": "PIRATEN Nürnberg",
+    "hashtags": "#Nürnberg #Piraten",
+    "postizKunde": "KV Nürnberg"
+  },
+  "!abcdefghijklmn:piratenpartei.de": {
+    "name": "LV Bayern",
+    "logo": "laender/bayern",
+    "design": "schwarz-weiss-orange",
+    "absender": "Piratenpartei Bayern",
+    "hashtags": "#Bayern #Piraten"
+  }
+}

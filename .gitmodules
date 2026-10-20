@@ -1,0 +1,3 @@
+[submodule "ppicng"]
+	path = ppicng
+	url = https://github.com/Piratenpartei/ppicng.git

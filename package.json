@@ -1,0 +1,19 @@
+{
+  "name": "piraten-posting-bot",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/bot.mjs",
+    "sharepic": "node scripts/sharepic.mjs",
+    "test": "TZ=Europe/Berlin node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.135.0",
+    "@napi-rs/canvas": "1.0.9",
+    "openai": "7.39.0",
+    "twitter-text": "3.1.0"
+  }
+}

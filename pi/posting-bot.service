@@ -1,0 +1,16 @@
+# Wird von pi/install.sh mit den richtigen Pfaden nach /etc/systemd/system/ kopiert.
+[Unit]
+Description=Piraten-Posting-Bot (Telegram/Matrix → ppicng-Design → Postiz)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@BENUTZER@
+WorkingDirectory=@VERZEICHNIS@
+ExecStart=@NODE@ src/bot.mjs
+Restart=always
+RestartSec=10
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

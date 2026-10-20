@@ -1,0 +1,9 @@
+# Begriffe, die Whisper kennen soll – einer pro Zeile.
+# „falsch => richtig“ wird nach der Erkennung automatisch ersetzt.
+PIRATEN
+Piratenpartei
+Piraten => PIRATEN
+Digitalisierung
+Datenschutz
+Transparenz
+Bürgerbeteiligung

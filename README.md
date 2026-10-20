@@ -1,0 +1,180 @@
+# Piraten-Posting-Bot
+
+Ein Bot für einheitliches Design bei der Piratenpartei – **auch für Videos**. Video oder Foto in **Telegram** oder
+**Matrix** (z. B. `matrix.piratenpartei.de`) reinschicken → der Bot baut es im Design von
+[ppicng](https://github.com/Piratenpartei/ppicng) → Vorschau anpassen → als fertige Datei holen oder direkt über
+[Postiz](https://postiz.com) posten bzw. planen. Postiz ist optional.
+
+Damit nicht jede Gliederung ihr eigenes Kraut und Rüben baut, nimmt der Bot alles, was das Design ausmacht, direkt
+aus ppicng – denselben Logos, Schriften und Farben wie die Sharepics aus der ppicng-Web-App:
+
+| aus ppicng | im Bot |
+|---|---|
+| Logos aller Gliederungen, AGs, JuPis, Listen (`src/logos/logos.json`) samt heller/dunkler Variante | Logo-Plakette im Video, Logo auf Sharepics, Titelkarte und Abspann – Variante automatisch passend zum Hintergrund |
+| Schriften Politics Head und DejaRip | Claim, Bauchbinde (Politics Head), Untertitel und Fließtext (DejaRip) |
+| Farbschemata von „classic“ (Weiß·Schwarz·Orange, Lila·Weiß·Orange …) und die Linie unter dem Claim | Sharepics, Titelkarte, Abspann, Bauchbinde, Untertitel-Flächen |
+| Layout von „classic“ (Claim eingepasst, Linie, Erklärtext, Logo unten, Foto daneben) | Sharepics und Karten im Video, nachgebaut mit Canvas (`src/grafik.mjs`) |
+
+ppicng hängt als **Git-Submodul** in `ppicng/`. Kommt dort ein neues Logo dazu, holt `bash pi/aktualisieren.sh`
+es mit. Wer eine eigene ppicng-Instanz mit weiteren Logos hat, trägt deren Pfad als `PPICNG_DIR` ein.
+
+![Beispiele](docs/beispiele.png)
+
+## Was der Bot kann
+
+| Eingabe | Ergebnis |
+|---|---|
+| **Video** | im gewählten Format (Original, 9:16, 4:5, 1:1, 16:9; mit unscharfem Rand oder zugeschnitten), mit Logo-Plakette, Untertiteln (whisper.cpp, lokal), Bauchbinde, Titelkarte und Abspann |
+| **`/sharepic Claim`** (Matrix: **`!sharepic Claim`**) | Sharepic wie aus ppicng; zweite Zeile = Erklärtext. Im Einzelchat bei Telegram reicht der Text allein |
+| **Foto** | mit Bildunterschrift: Sharepic mit Foto (Foto neben/über der Textfläche oder als Hintergrund); ohne: Foto mit Logo |
+| **`/logo Bayern`** | Logos aus ppicng suchen, mit ID für `.env` und `chats.json` |
+
+Danach kommt die Vorschau und darunter das Menü:
+
+| Knopf | |
+|---|---|
+| ✅ Jetzt posten · 🕐 Planen | nur mit Postiz: fragt nach und postet; Planen mit Vorschlägen, nächstem freien Postiz-Slot oder Eingabe wie `Fr 18 Uhr`, `24.10. 19:30`, `in 2 Stunden` |
+| 📥 Fertige Datei | die Datei in voller Qualität – auch ganz ohne Postiz |
+| 🎨 Gestaltung | Design, Logo, Format, Untertitel (an/aus, Lage, Fläche oder Kontur, Korrekturen), Bauchbinde, Titelkarte, Abspann; bei Sharepics Claim, Erklärtext und Foto-Stil. „Übernehmen“ baut neu |
+| ✏️ Text ändern · 🔄 Neu formulieren | Beitragstext; neu formulieren nur mit KI-Schlüssel (Claude oder OpenAI) |
+| 📺 Kanäle · 👤 Kunde | nur mit Postiz: Kanäle an-/abwählen, Postiz-Kunden (z. B. eine Gliederung) wählen |
+| 🗑️ Verwerfen | |
+
+Für **Titelkarte und Abspann** kann man statt Text auch ein eigenes Bild schicken – zum Beispiel ein Sharepic, das
+man vorher in der ppicng-Web-App gebaut hat (`PPICNG_URL` setzen, dann verlinkt der Bot sie).
+
+Untertitel-Korrekturen: unter 📝 Untertitel → ✏️ Korrigieren Zeilen wie `Pieraten => PIRATEN` schicken oder die
+korrigierte `.srt`-Datei. Wiederkehrende Begriffe gehören ins `glossar.txt`.
+
+Ist ein Text für einen Kanal zu lang (X 280, Bluesky 300, Mastodon 500 …), lässt der Bot nicht posten und bietet
+„✂️ Automatisch kürzen“ an. 15 Minuten nach jedem Termin schaut er in Postiz nach und meldet sich, wenn etwas hängt
+oder ein Netzwerk abgelehnt hat.
+
+## Telegram und Matrix
+
+Beide laufen gleichzeitig, wenn beide eingetragen sind; mindestens eins muss es sein.
+
+### Telegram
+
+1. **@BotFather** → `/newbot` → Token als `TELEGRAM_BOT_TOKEN` eintragen.
+2. Dem Bot `/id` schicken, die ID in `TELEGRAM_ERLAUBT` eintragen. Für Gruppen: Bot einladen, bei @BotFather
+   `/setprivacy` → **Disable**, in der Gruppe `/id` schicken und die (negative) Gruppen-ID eintragen – dann dürfen
+   alle in der Gruppe.
+3. Videos am besten **als Datei** schicken (📎 → Datei), sonst komprimiert Telegram sie. Über `api.telegram.org`
+   gehen nur 20 MB herunter und 50 MB hoch; für größere Videos einen lokalen
+   [Bot-API-Server](https://github.com/tdlib/telegram-bot-api) betreiben und `TELEGRAM_API_URL` setzen (wie im
+   [Stadtrat-Bot](https://github.com/vwt1812-glitch/stadtrat-social-bot#große-videos-über-20-mb) beschrieben).
+
+### Matrix (matrix.piratenpartei.de)
+
+1. Ein eigenes Konto für den Bot anlegen, z. B. `@posting-bot:piratenpartei.de`.
+2. In `.env`: `MATRIX_URL=https://matrix.piratenpartei.de` und entweder `MATRIX_TOKEN` (Element → Einstellungen →
+   Hilfe & Info → Zugriffstoken) oder `MATRIX_NUTZER` + `MATRIX_PASSWORT` – dann meldet sich der Bot selbst an.
+3. `MATRIX_ERLAUBT`: Personen (`@anja:piratenpartei.de`), Räume (`!abc…:piratenpartei.de`) oder gleich alle auf
+   einem Server (`*:piratenpartei.de`). Einladungen von Erlaubten nimmt der Bot selbst an.
+4. Den Bot in einen Raum einladen oder direkt anschreiben.
+
+Matrix kennt keine Knöpfe. Der Bot schreibt die Auswahl deshalb nummeriert unter seine Nachricht und setzt die
+Reaktionen **1️⃣ 2️⃣ 3️⃣ …** gleich selbst darunter – antippen genügt. Man kann auch einfach die Zahl schicken.
+Ein neues Menü ersetzt das alte, damit der Raum übersichtlich bleibt. Befehle in Matrix mit `!` statt `/`
+(`!sharepic`, `!logo`, `!status`), weil Element `/…` als eigenen Befehl versteht.
+
+**Ratenlimit:** Synapse bremst Konten, die viele Nachrichten schnell hintereinander schicken – der Bot setzt pro
+Menü bis zu zehn Reaktionen. Er wartet dann selbst, schneller geht es, wenn die Admins von matrix.piratenpartei.de
+das Bot-Konto vom Limit ausnehmen (Admin-API `/_synapse/admin/v1/users/<id>/override_ratelimit`).
+
+**Verschlüsselung:** Der Bot liest keine Ende-zu-Ende-verschlüsselten Räume (und sagt das auch). Für den Bot einen
+unverschlüsselten Raum nehmen – bei neuen Räumen und Direktnachrichten in Element vor dem Anlegen
+„Ende-zu-Ende-Verschlüsselung“ ausschalten. Wer Verschlüsselung braucht, setzt
+[pantalaimon](https://github.com/matrix-org/pantalaimon) davor und trägt dessen Adresse als `MATRIX_URL` ein.
+
+## Ohne und mit Postiz
+
+Ohne `POSTIZ_URL` ist der Bot ein reines Design-Werkzeug: Er baut Videos und Sharepics, und mit **📥 Fertige Datei**
+holt man sie ab. Mit `AUSGABE_ORDNER` landen alle fertigen Dateien zusätzlich in einem Ordner, etwa einem
+Nextcloud-Sync-Ordner des Social-Media-Teams.
+
+Mit Postiz: In Postiz **Einstellungen → Developers → Public API** den Schlüssel holen, `POSTIZ_URL` und
+`POSTIZ_API_KEY` eintragen. Die Kanäle ordnet man in Postiz Kunden zu (z. B. „KV Nürnberg“, „LV Bayern“); der Bot
+liest sie von dort. Postiz erlaubt standardmäßig 30 API-Anfragen pro Stunde, der Bot zählt mit
+(`POSTIZ_MAX_ANFRAGEN`). Einstellungen je Netzwerk (Pinterest-Board, TikTok-Sichtbarkeit, eigene Zeichenlimits)
+kommen in `kanaele.json` (Vorlage: `kanaele.example.json`). `/kanaele` listet alle Kanäle mit IDs.
+
+## Ein Bot für mehrere Gliederungen
+
+Voreinstellungen je Telegram-Chat oder Matrix-Raum stehen in `chats.json` (Vorlage: `chats.example.json`): Logo,
+Design, Bauchbinde, Absender für die KI-Texte, Hashtags und Postiz-Kunde. So kann ein Bot auf einem Server viele
+Gliederungen bedienen – jede bekommt im eigenen Raum ihr Logo, alle dasselbe Design.
+
+```json
+{
+  "!abcdefghijklmn:piratenpartei.de": {
+    "logo": "laender/bayern",
+    "design": "schwarz-weiss-orange",
+    "absender": "Piratenpartei Bayern",
+    "hashtags": "#Bayern #Piraten",
+    "postizKunde": "LV Bayern"
+  }
+}
+```
+
+## Einrichten (Raspberry Pi oder Server)
+
+Getestet mit Node.js 22 und ffmpeg auf Debian/Raspberry Pi OS (64 Bit). Ein Pi 5 ist für Videos empfehlenswert,
+ein Pi 4 geht, braucht aber länger. Ohne Spracherkennung reicht deutlich weniger.
+
+```bash
+git clone --recurse-submodules https://github.com/vwt1812-glitch/piraten-posting-bot.git
+cd piraten-posting-bot
+bash pi/install.sh             # ffmpeg, Node.js, ppicng, whisper.cpp samt Modell, .env, Dienst
+nano .env                      # Telegram und/oder Matrix, optional Postiz und KI
+sudo systemctl start posting-bot
+```
+
+`OHNE_WHISPER=1 bash pi/install.sh` lässt die Spracherkennung weg, `WHISPER_GROESSE=base` nimmt ein kleineres
+Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppicng-Stand, Whisper, Postiz und KI.
+
+| Befehl | |
+|---|---|
+| `journalctl -u posting-bot -f` | Protokoll ansehen |
+| `sudo systemctl restart posting-bot` | neu starten, z. B. nach Änderungen an `.env` |
+| `bash pi/aktualisieren.sh` | neuen Code und neue ppicng-Logos holen, neu starten |
+| `npm run sharepic -- "Claim" --design lila-weiss-orange --logo laender/bayern --format 4:5` | Sharepic ohne Bot bauen, zum Ausprobieren |
+| `npm test` | Tests (inkl. Ende-zu-Ende-Lauf gegen nachgebaute Telegram-, Matrix- und Postiz-Server) |
+
+## Gestaltung im Video
+
+- **Logo-Plakette** oben links (`LOGO_POSITION`), Logo auf einer Fläche in der Hintergrundfarbe des Designs mit der
+  farbigen Linie darunter – wie die Linie unter dem Claim in ppicng. `LOGO_STIL=frei` setzt nur das helle Logo mit
+  Schatten. Hochkant beginnt sie bei 14 % der Höhe, frei von den Reitern von Reels und TikTok.
+- **Untertitel** in DejaRip Bold auf einer Fläche im Design (`UNTERTITEL_STIL=box`) oder weiß mit Kontur (`rand`),
+  einzeilig in kurzen Häppchen; hochkant über Name und Caption der Apps, pro Video unten/Mitte/oben.
+- **Bauchbinde**: Name in Politics Head mit Linie, Funktion in DejaRip; gleitet nach `BAUCHBINDE_START` Sekunden
+  herein und verdeckt die Untertitel nicht.
+- **Titelkarte und Abspann**: Karten im ppicng-Layout (Claim, Linie, Logo), weich überblendet; die Länge stellen
+  `TITELKARTE_DAUER` und `ABSPANN_DAUER` ein.
+
+## Aufbau
+
+| Datei | Inhalt |
+|---|---|
+| `src/bot.mjs` | Ablauf: Eingang, Menüs bedienen, bauen, posten, Kontrolle |
+| `src/plattform/telegram.mjs` | Telegram Bot API, Knöpfe |
+| `src/plattform/matrix.mjs` | Matrix Client-Server-API ohne SDK: Sync, Einladungen, Medien, Menüs mit Reaktionen |
+| `src/menues.mjs` | Texte und Knöpfe aller Menüs (für beide Plattformen gleich) |
+| `src/ppicng.mjs` | ppicng einlesen: Logos samt Varianten, Schriften, Farbschemata, Logosuche |
+| `src/grafik.mjs` | Sharepic, Logo-Plakette, Bauchbinde, Titelkarte im ppicng-Layout (Canvas) |
+| `src/video.mjs` | ffmpeg: Format, Untertitel, Logo, Bauchbinde, Titelkarte und Abspann verketten |
+| `src/untertitel.mjs` · `src/whisper.mjs` | SRT/ASS, Korrekturen, Spracherkennung mit whisper.cpp |
+| `src/caption.mjs` | Beitragstext (Claude, OpenAI oder einfacher Vorschlag), Kürzen |
+| `src/postiz.mjs` · `src/kontrolle.mjs` | Postiz Public API, Zeichenzählung, Anfragenlimit, Kontrolle nach dem Posten |
+| `src/zeit.mjs` · `src/auftraege.mjs` | Zeitangaben verstehen; Stand je Beitrag in `daten/auftraege.json` (nach 14 Tagen aufgeräumt) |
+
+Untertitel, Caption, Postiz, Kontrolle, Zeitangaben und die Pi-Skripte stammen aus dem
+[Stadtrat-Social-Bot](https://github.com/vwt1812-glitch/stadtrat-social-bot) und
+[eu-piraten-abstimmungen](https://github.com/vwt1812-glitch/eu-piraten-abstimmungen).
+
+## Lizenzen
+
+Logos, Schriften und Designs gehören zu ppicng bzw. der Piratenpartei und liegen nicht in diesem Repository (außer im Beispielbild `docs/beispiele.png`),
+sondern kommen über das Submodul. Der Code von ppicng steht unter der MIT-Lizenz (Martin Stoppler).
