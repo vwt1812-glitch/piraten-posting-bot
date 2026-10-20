@@ -1,9 +1,9 @@
 # Piraten-Posting-Bot
 
 Ein Bot für einheitliches Design bei der Piratenpartei – **auch für Videos**. Video oder Foto in **Telegram** oder
-**Matrix** (z. B. `matrix.piratenpartei.de`) reinschicken → der Bot baut es im Design von
-[ppicng](https://github.com/Piratenpartei/ppicng) → Vorschau anpassen → als fertige Datei holen oder direkt über
-[Postiz](https://postiz.com) posten bzw. planen. Postiz ist optional.
+**Matrix** (z. B. `matrix.piratenpartei.de`) reinschicken – oder in der **Web-Version** im Browser hochladen → es
+entsteht im Design von [ppicng](https://github.com/Piratenpartei/ppicng) → Vorschau anpassen → als fertige Datei
+holen oder direkt über [Postiz](https://postiz.com) posten bzw. planen. Postiz ist optional.
 
 Damit nicht jede Gliederung ihr eigenes Kraut und Rüben baut, nimmt der Bot alles, was das Design ausmacht, direkt
 aus ppicng – denselben Logos, Schriften und Farben wie die Sharepics aus der ppicng-Web-App:
@@ -50,9 +50,52 @@ Ist ein Text für einen Kanal zu lang (X 280, Bluesky 300, Mastodon 500 …), l�
 „✂️ Automatisch kürzen“ an. 15 Minuten nach jedem Termin schaut er in Postiz nach und meldet sich, wenn etwas hängt
 oder ein Netzwerk abgelehnt hat.
 
+## Web-Version
+
+Wie ppicng, aber auch für Videos: Sharepic gestalten mit Live-Vorschau, Video hochladen, Format, Logo, Untertitel
+(direkt im Browser korrigierbar), Bauchbinde, Titelkarte und Abspann einstellen, Standbild-Vorschau ansehen,
+bauen, herunterladen – und, wenn freigeschaltet, über Postiz posten. Sie läuft im selben Prozess wie der Bot und
+teilt sich dessen Warteschlange; es geht aber auch ganz ohne Telegram und Matrix.
+
+![Web-Version](docs/web.png)
+
+```
+WEB_PORT=8090
+WEB_URL=https://posting.piraten-nuernberg.de
+# Anmeldung mit dem eigenen Konto von matrix.piratenpartei.de …
+WEB_MATRIX_ANMELDUNG=ja
+WEB_ERLAUBT=*:piratenpartei.de
+# … und/oder mit einem Team-Passwort
+WEB_PASSWORT=
+# Posten über Postiz nur für bestimmte Leute (oder ja = alle Angemeldeten)
+WEB_POSTEN=@anja:piratenpartei.de,@bob:piratenpartei.de
+```
+
+- **Anmeldung:** Mit `WEB_MATRIX_ANMELDUNG=ja` melden sich Piraten mit ihrem Matrix-Konto an; erlaubt ist, wer in
+  `WEB_ERLAUBT` passt (`*:piratenpartei.de` = alle mit Konto dort). Das Passwort geht nur einmal zur Prüfung an den
+  Matrix-Server, der Bot speichert es nicht und meldet die dabei entstandene Sitzung sofort wieder ab. Alternativ
+  oder zusätzlich `WEB_PASSWORT` als gemeinsames Team-Passwort. Ohne beides startet die Web-Version nicht (außer
+  ausdrücklich mit `WEB_OFFEN=ja`, nur fürs eigene Netz). Nach zehn Fehlversuchen ist für 15 Minuten Pause.
+- **Posten** im Browser ist standardmäßig aus (`WEB_POSTEN=nein`), weil damit jede angemeldete Person auf die
+  Kanäle der Partei posten könnte. Herunterladen geht immer.
+- **Jede Person sieht nur ihre eigenen Beiträge** (beim Team-Passwort: alle mit demselben Namen).
+- **HTTPS:** Die Web-Version lauscht standardmäßig nur auf `127.0.0.1`. Davor gehört ein Reverse-Proxy mit HTTPS,
+  Vorlage für nginx: `pi/nginx.conf` (große Uploads durchreichen: `client_max_body_size`, `proxy_request_buffering off`).
+- Die Seite kommt ohne fremde Server aus (keine CDNs, keine Tracker), Schriften und Logos liefert der Bot selbst.
+
+## Gesicht und Untertitel
+
+Bei Hochkant-Videos sucht der Bot in 12 Bildern das Gesicht (OpenCV, lokal, ein paar Sekunden) und legt die
+Untertitel dorthin, wo sie es nicht verdecken – bevorzugt unten, sonst oben, sonst in der Mitte („📍 Lage:
+automatisch“, im Menü bzw. in der Web-Version überschreibbar). Weil das Video vorher ins Zielformat gesetzt wird
+(z. B. ein Querformat-Video mit Rand in 9:16), rechnet der Bot die Lage des Gesichts erst auf das fertige Bild
+um. Füllt das Gesicht fast das ganze Bild oder reicht der Kopf ins Logo, gibt es einen 💡-Tipp für die nächste
+Aufnahme. `pi/install.sh` richtet Python mit OpenCV in `.venv` ein; fehlt es, bleibt die Suche einfach aus.
+Übernommen aus dem [Stadtrat-Social-Bot](https://github.com/vwt1812-glitch/stadtrat-social-bot).
+
 ## Telegram und Matrix
 
-Beide laufen gleichzeitig, wenn beide eingetragen sind; mindestens eins muss es sein.
+Beide laufen gleichzeitig, wenn beide eingetragen sind; mindestens eins davon oder die Web-Version muss es sein.
 
 ### Telegram
 
@@ -127,11 +170,11 @@ ein Pi 4 geht, braucht aber länger. Ohne Spracherkennung reicht deutlich wenige
 git clone --recurse-submodules https://github.com/vwt1812-glitch/piraten-posting-bot.git
 cd piraten-posting-bot
 bash pi/install.sh             # ffmpeg, Node.js, ppicng, whisper.cpp samt Modell, .env, Dienst
-nano .env                      # Telegram und/oder Matrix, optional Postiz und KI
+nano .env                      # Telegram, Matrix und/oder Web-Version, optional Postiz und KI
 sudo systemctl start posting-bot
 ```
 
-`OHNE_WHISPER=1 bash pi/install.sh` lässt die Spracherkennung weg, `WHISPER_GROESSE=base` nimmt ein kleineres
+`OHNE_WHISPER=1` lässt die Spracherkennung weg, `OHNE_GESICHT=1` die Gesichtssuche, `WHISPER_GROESSE=base` nimmt ein kleineres
 Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppicng-Stand, Whisper, Postiz und KI.
 
 | Befehl | |
@@ -140,7 +183,7 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 | `sudo systemctl restart posting-bot` | neu starten, z. B. nach Änderungen an `.env` |
 | `bash pi/aktualisieren.sh` | neuen Code und neue ppicng-Logos holen, neu starten |
 | `npm run sharepic -- "Claim" --design lila-weiss-orange --logo laender/bayern --format 4:5` | Sharepic ohne Bot bauen, zum Ausprobieren |
-| `npm test` | Tests (inkl. Ende-zu-Ende-Lauf gegen nachgebaute Telegram-, Matrix- und Postiz-Server) |
+| `npm test` | Tests (inkl. Ende-zu-Ende-Läufen gegen nachgebaute Telegram-, Matrix- und Postiz-Server und über die Web-API) |
 
 ## Gestaltung im Video
 
@@ -158,7 +201,10 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 
 | Datei | Inhalt |
 |---|---|
-| `src/bot.mjs` | Ablauf: Eingang, Menüs bedienen, bauen, posten, Kontrolle |
+| `src/bot.mjs` | Start; Ablauf im Chat: Eingang, Menüs bedienen, posten, Kontrolle |
+| `src/werkstatt.mjs` | gemeinsam für Bot und Web: Aufträge, Analyse, Bauen, Standbild, Postiz, Warteschlange |
+| `src/web.mjs` · `web/` | Web-Version: HTTP-API (Anmeldung, Upload, Vorschau, Bauen, Posten) und Seite ohne Build-Schritt |
+| `src/gesicht.mjs` · `src/gesicht.py` | Gesicht finden (OpenCV), aufs Zielformat umrechnen, Lage der Untertitel wählen |
 | `src/plattform/telegram.mjs` | Telegram Bot API, Knöpfe |
 | `src/plattform/matrix.mjs` | Matrix Client-Server-API ohne SDK: Sync, Einladungen, Medien, Menüs mit Reaktionen |
 | `src/menues.mjs` | Texte und Knöpfe aller Menüs (für beide Plattformen gleich) |

@@ -47,7 +47,7 @@ export class Auftraege {
   aufraeumen(tage = 14) {
     const grenze = Date.now() - tage * 86400e3;
     for (const a of Object.values(this.alle)) {
-      if (["gepostet", "geplant", "verworfen", "fehler", "bereit"].includes(a.status) && Date.parse(a.erstellt) < grenze) {
+      if (["gepostet", "geplant", "verworfen", "fehler", "bereit", "entwurf"].includes(a.status) && Date.parse(a.erstellt) < grenze) {
         fs.rmSync(a.ordner, { recursive: true, force: true });
         delete this.alle[a.id];
       }

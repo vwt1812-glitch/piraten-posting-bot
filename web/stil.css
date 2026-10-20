@@ -1,0 +1,113 @@
+/* Im Stil der Piratenpartei: Orange, Schwarz, Weiß, Lila – Schriften aus ppicng */
+@font-face { font-family: "Politics Head"; src: url("/schriften/claim.otf") format("opentype"); font-display: swap; }
+@font-face { font-family: "DejaRip"; src: url("/schriften/text.otf") format("opentype"); font-display: swap; }
+@font-face { font-family: "DejaRip"; font-weight: bold; src: url("/schriften/fett.otf") format("opentype"); font-display: swap; }
+
+:root {
+  --orange: #ff8800;
+  --lila: #652480;
+  --schwarz: #111;
+  --grund: #f4f2ef;
+  --karte: #fff;
+  --linie: #ddd8d0;
+  --text: #1b1b1b;
+  --leise: #666;
+  --fehler: #b3261e;
+  --gut: #1e7a3c;
+  --rund: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --grund: #18171a; --karte: #232226; --linie: #3a383e; --text: #eee; --leise: #aaa; --fehler: #ff8a80; --gut: #7bd88f; }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+  font: 16px/1.45 DejaRip, system-ui, sans-serif; color: var(--text); background: var(--grund);
+}
+a { color: var(--orange); }
+h1, h2, h3, .marke { font-family: "Politics Head", DejaRip, sans-serif; font-weight: normal; text-transform: uppercase; letter-spacing: .02em; }
+h1 { font-size: 2rem; margin: .2em 0 .4em; }
+h2 { font-size: 1.35rem; margin: 0 0 .5em; }
+h3 { font-size: 1.05rem; margin: 1.2em 0 .4em; }
+
+.kopf { background: var(--schwarz); color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .6rem 1rem; border-bottom: 4px solid var(--orange); flex-wrap: wrap; }
+.marke { color: #fff; text-decoration: none; font-size: 1.6rem; line-height: 1; }
+.marke span { color: var(--orange); margin-left: .3em; }
+nav { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+nav a, .link { color: #fff; text-decoration: none; background: none; border: 0; font: inherit; cursor: pointer; padding: 0; }
+nav a:hover, .link:hover { color: var(--orange); }
+
+main { flex: 1; width: 100%; max-width: 1200px; margin: 0 auto; padding: 1rem; }
+.fuss { text-align: center; color: var(--leise); font-size: .85rem; padding: 1rem; }
+.laden { color: var(--leise); }
+
+.karte { background: var(--karte); border: 1px solid var(--linie); border-radius: var(--rund); padding: 1rem; }
+.start { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-bottom: 1.5rem; }
+.start .karte { display: flex; flex-direction: column; gap: .6rem; }
+.start p { margin: 0; color: var(--leise); }
+
+.editor { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); align-items: start; }
+@media (max-width: 860px) { .editor { grid-template-columns: 1fr; } .vorschau-spalte { order: -1; } }
+.vorschau-spalte { position: sticky; top: 1rem; }
+@media (max-width: 860px) { .vorschau-spalte { position: static; } }
+.vorschau { background: repeating-conic-gradient(#ccc 0 25%, #eee 0 50%) 0 0 / 20px 20px; border-radius: var(--rund); overflow: hidden; display: grid; place-items: center; min-height: 200px; position: relative; }
+.vorschau img, .vorschau video { display: block; max-width: 100%; max-height: 75vh; height: auto; background: #000; }
+.vorschau .hinweis { position: absolute; inset: auto .5rem .5rem .5rem; background: rgba(0,0,0,.7); color: #fff; padding: .3rem .6rem; border-radius: 6px; font-size: .85rem; }
+.vorschau.arbeitet::after { content: ""; position: absolute; inset: 0; background: rgba(255,255,255,.35); }
+
+label { display: block; font-weight: bold; margin: .7rem 0 .25rem; }
+label.zeile { display: flex; align-items: center; gap: .5rem; font-weight: normal; margin: .5rem 0; }
+input[type=text], input[type=password], input[type=search], input[type=datetime-local], select, textarea {
+  width: 100%; font: inherit; color: var(--text); background: var(--grund); border: 1px solid var(--linie); border-radius: 6px; padding: .5rem .6rem;
+}
+textarea { min-height: 4.5em; resize: vertical; }
+textarea.srt { font-family: ui-monospace, monospace; font-size: .85rem; min-height: 14em; }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 3px solid var(--orange); outline-offset: 1px; }
+.reihe { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.reihe > * { flex: 1 1 auto; }
+.leise { color: var(--leise); font-size: .9rem; }
+.fehler { color: var(--fehler); }
+.gut { color: var(--gut); }
+
+button, .knopf {
+  display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
+  font: inherit; font-weight: bold; border: 0; border-radius: 6px; padding: .6rem 1rem; cursor: pointer; text-decoration: none;
+  background: var(--orange); color: #000;
+}
+button.zweit, .knopf.zweit { background: transparent; color: var(--text); border: 1px solid var(--linie); }
+button.lila { background: var(--lila); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+button.klein { padding: .3rem .6rem; font-size: .9rem; }
+
+.designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: .5rem; }
+.design { padding: 0; border: 2px solid var(--linie); background: none; border-radius: 8px; overflow: hidden; display: block; text-align: left; color: var(--text); }
+.design[aria-pressed=true] { border-color: var(--orange); box-shadow: 0 0 0 2px var(--orange); }
+.design .muster { height: 46px; display: flex; flex-direction: column; justify-content: center; padding: 0 .5rem; font-family: "Politics Head"; font-size: 1.1rem; }
+.design .muster i { display: block; height: 4px; width: 60%; margin-top: 2px; }
+.design small { display: block; padding: .2rem .4rem; font-weight: normal; font-size: .72rem; }
+
+.logos { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: .5rem; margin-top: .5rem; max-height: 300px; overflow: auto; }
+.logo-wahl { background: #fff; color: #111; border: 2px solid var(--linie); padding: .4rem; display: flex; flex-direction: column; align-items: stretch; gap: .2rem; font-weight: normal; font-size: .8rem; }
+.logo-wahl img { height: 40px; object-fit: contain; }
+.logo-wahl[aria-pressed=true] { border-color: var(--orange); }
+.logo-aktuell { display: flex; gap: .7rem; align-items: center; }
+.logo-aktuell img { height: 42px; max-width: 160px; object-fit: contain; background: #fff; border-radius: 4px; padding: 3px; }
+
+details { border-top: 1px solid var(--linie); padding: .4rem 0; }
+details > summary { cursor: pointer; font-family: "Politics Head"; text-transform: uppercase; font-size: 1.05rem; padding: .3rem 0; }
+.schritt { display: flex; align-items: center; gap: .6rem; padding: .8rem; background: var(--grund); border-radius: 8px; margin: .5rem 0; }
+.drehen { width: 18px; height: 18px; border: 3px solid var(--orange); border-right-color: transparent; border-radius: 50%; animation: drehen 1s linear infinite; flex: none; }
+@keyframes drehen { to { transform: rotate(360deg); } }
+.fortschritt { height: 8px; background: var(--linie); border-radius: 4px; overflow: hidden; }
+.fortschritt div { height: 100%; background: var(--orange); width: 0; transition: width .2s; }
+.kanaele { display: grid; gap: .2rem; }
+.kanaele small { color: var(--leise); }
+.liste { list-style: none; padding: 0; margin: 0; display: grid; gap: .4rem; }
+.liste a { display: flex; justify-content: space-between; gap: 1rem; padding: .6rem .8rem; background: var(--karte); border: 1px solid var(--linie); border-radius: 8px; color: var(--text); text-decoration: none; }
+.liste a:hover { border-color: var(--orange); }
+.anmelden { max-width: 420px; margin: 2rem auto; }
+.kartenbild { max-width: 140px; border-radius: 6px; border: 1px solid var(--linie); display: block; margin-top: .4rem; }
+.unsichtbar { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }

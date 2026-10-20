@@ -118,8 +118,9 @@ export function bauchbindeLage({ masse, grafik, untertitel, lage }) {
  * @param {string} o.fontsDir Ordner mit DejaRip für die Untertitel
  * @param {object} o.zeiten config.zeiten
  * @param {object} o.video config.video
+ * @param {number} [o.standbild] statt des Videos nur ein JPEG dieser Sekunde (ohne Titelkarte, Abspann, Ton)
  */
-export async function renderArgs({ eingabe, ausgabe, quelle, e, schema, logo, ass, fontsDir, zeiten, video }) {
+export async function renderArgs({ eingabe, ausgabe, quelle, e, schema, logo, ass, fontsDir, zeiten, video, standbild }) {
   const ordner = path.dirname(ausgabe);
   const masse = zielMasse(e.format, quelle);
   const dauer = Math.max(0.1, quelle.dauer);
@@ -178,6 +179,12 @@ export async function renderArgs({ eingabe, ausgabe, quelle, e, schema, logo, as
   };
   const vorne = await karte("titelkarte", e.titelkarte, zeiten.titelkarte);
   const hinten = await karte("abspann", e.abspannAn ? (e.abspann ?? { claim: e.abspannText }) : null, zeiten.abspann);
+
+  if (standbild !== undefined) {
+    filter.push(`[${letzte}]format=yuvj420p[v]`);
+    args.push("-filter_complex", filter.join(";"), "-map", "[v]", "-ss", String(standbild), "-frames:v", "1", "-q:v", "3", ausgabe);
+    return { args, masse };
+  }
 
   filter.push(`[${letzte}]format=yuv420p[haupt]`);
   filter.push(quelle.hatTon

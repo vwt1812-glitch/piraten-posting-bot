@@ -91,6 +91,30 @@ function whisperConfig() {
   };
 }
 
+function webConfig() {
+  const port = env("WEB_PORT");
+  if (!port) return null;
+  const posten = env("WEB_POSTEN", "nein");
+  return {
+    port: Number(port),
+    // Öffentliche Adresse (hinter dem Reverse-Proxy), wird im Bot verlinkt, z. B. https://posting.piraten-xy.de
+    url: env("WEB_URL", ""),
+    adresse: env("WEB_ADRESSE", "127.0.0.1"),
+    // Anmeldung: gemeinsames Passwort und/oder das eigene Matrix-Konto
+    passwort: env("WEB_PASSWORT"),
+    matrixAnmeldung: ja("WEB_MATRIX_ANMELDUNG", false),
+    matrixUrl: env("WEB_MATRIX_URL", env("MATRIX_URL", "https://matrix.piratenpartei.de")).replace(/\/$/, ""),
+    // Wer sich mit Matrix anmelden darf: @name:server, *:server
+    erlaubt: liste("WEB_ERLAUBT"),
+    // Ohne jede Anmeldung nur mit WEB_OFFEN=ja (z. B. nur im eigenen Netz)
+    offen: ja("WEB_OFFEN", false),
+    // Wer posten darf: ja (alle Angemeldeten), nein, oder Liste wie WEB_ERLAUBT
+    posten: /^(ja|nein)$/i.test(posten) ? posten.toLowerCase() === "ja" : posten.split(",").map((s) => s.trim()).filter(Boolean),
+    maxMb: Number(env("WEB_MAX_MB", "500")),
+    geheimnis: env("WEB_GEHEIMNIS"),
+  };
+}
+
 export function ladeConfig() {
   const config = {
     telegram: telegramConfig(),
@@ -98,6 +122,9 @@ export function ladeConfig() {
     postiz: postizConfig(),
     whisper: whisperConfig(),
     glossar: pfad(env("GLOSSAR", "glossar.txt")),
+    // Python mit OpenCV für die Gesichtssuche (pi/install.sh legt es in .venv an); fehlt es, bleibt die Suche aus
+    gesicht: { python: pfad(env("GESICHT_PYTHON", ".venv/bin/python")) },
+    web: webConfig(),
     ppicng: {
       // Checkout von github.com/Piratenpartei/ppicng (Git-Submodul) – Logos, Schriften, Farben
       dir: pfad(env("PPICNG_DIR", "ppicng")),
@@ -141,9 +168,14 @@ export function ladeConfig() {
     ausgabeOrdner: pfad(env("AUSGABE_ORDNER", "")),
     datenDir: pfad(env("DATEN_DIR", "daten")),
   };
-  if (!config.telegram && !config.matrix) {
-    throw new Error("Weder Telegram noch Matrix eingerichtet – TELEGRAM_BOT_TOKEN und/oder MATRIX_TOKEN in .env eintragen (Vorlage: .env.example).");
+  if (!config.telegram && !config.matrix && !config.web) {
+    throw new Error("Weder Telegram noch Matrix noch die Web-Version eingerichtet – TELEGRAM_BOT_TOKEN, MATRIX_TOKEN und/oder WEB_PORT in .env eintragen (Vorlage: .env.example).");
   }
+  const w = config.web;
+  if (w && !w.passwort && !w.matrixAnmeldung && !w.offen) {
+    throw new Error("Web-Version ohne Anmeldung: WEB_PASSWORT setzen, WEB_MATRIX_ANMELDUNG=ja – oder ausdrücklich WEB_OFFEN=ja (nur im eigenen Netz!).");
+  }
+  if (w?.matrixAnmeldung && !w.erlaubt.length) throw new Error("WEB_MATRIX_ANMELDUNG braucht WEB_ERLAUBT, z. B. *:piratenpartei.de");
   return config;
 }
 

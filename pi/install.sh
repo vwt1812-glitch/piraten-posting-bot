@@ -2,6 +2,7 @@
 # Einrichtung auf dem Raspberry Pi (Raspberry Pi OS 64-bit) oder einem Debian/Ubuntu-Server.
 # Aufruf im Projektordner: bash pi/install.sh
 #   Ohne Spracherkennung:   OHNE_WHISPER=1 bash pi/install.sh
+#   Ohne Gesichtssuche:     OHNE_GESICHT=1 bash pi/install.sh
 #   Anderes Whisper-Modell: WHISPER_GROESSE=base bash pi/install.sh (Standard: small)
 # Aufbau nach vwt1812-glitch/stadtrat-social-bot (pi/install.sh).
 set -euo pipefail
@@ -27,6 +28,13 @@ node --version
 
 echo "== Abhängigkeiten"
 npm ci
+
+if [ -z "${OHNE_GESICHT:-}" ]; then
+  echo "== Gesichtssuche (Python mit OpenCV in .venv)"
+  sudo apt-get install -y python3-venv
+  [ -x .venv/bin/python ] || python3 -m venv .venv
+  .venv/bin/pip install -q --disable-pip-version-check "opencv-python-headless>=4.10,<5"
+fi
 
 MODELL=""
 if [ -z "${OHNE_WHISPER:-}" ]; then
@@ -61,7 +69,7 @@ sudo systemctl enable posting-bot
 cat <<TEXT
 
 Fertig. Nächste Schritte:
-  1. nano .env                              (Telegram und/oder Matrix eintragen, optional Postiz und KI)
+  1. nano .env                              (Telegram, Matrix und/oder WEB_PORT eintragen, optional Postiz und KI)
   2. sudo systemctl start posting-bot
   3. dem Bot /status schicken (in Matrix: !status)
   Protokoll: journalctl -u posting-bot -f

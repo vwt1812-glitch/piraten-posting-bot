@@ -1,31 +1,30 @@
 // Piraten-Posting-Bot: Videos und Sharepics im einheitlichen ppicng-Design, gesteuert über Telegram
-// und/oder Matrix, gepostet über Postiz (optional). Start: npm start
+// und/oder Matrix und über die Web-Version, gepostet über Postiz (optional). Start: npm start
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { ladeConfig, chatStandard } from "./config.mjs";
-import { Auftraege } from "./auftraege.mjs";
 import { TelegramPlattform } from "./plattform/telegram.mjs";
 import { MatrixPlattform } from "./plattform/matrix.mjs";
-import { ladePpicng, logoNachId, sucheLogos, farbschema } from "./ppicng.mjs";
-import { schriftenAnmelden, sharepic, fotoMitLogo } from "./grafik.mjs";
-import { ausfuehren, untersuche, tonFuerWhisper, rendern, vorschau, zielMasse, FORMATE, fotoFuerKi, fotoNormalisieren, standbild } from "./video.mjs";
-import { transkribiere } from "./whisper.mjs";
-import { parseSrt, formatSrt, parseKorrekturen, wendeKorrekturenAn, parseBauchbinde, zuAss, volltext } from "./untertitel.mjs";
-import { captionVorschlag, kuerzen } from "./caption.mjs";
-import { Postiz, AnfragenZaehler, passendeKanaele, passtZu, kundenAus, findeKunde, kanaeleVonKunde, zeichenLimit, zeichenZahl } from "./postiz.mjs";
+import { ladePpicng, sucheLogos } from "./ppicng.mjs";
+import { schriftenAnmelden } from "./grafik.mjs";
+import { ausfuehren, fotoNormalisieren } from "./video.mjs";
+import { parseSrt, formatSrt, parseKorrekturen, wendeKorrekturenAn, parseBauchbinde, volltext } from "./untertitel.mjs";
+import { kuerzen } from "./caption.mjs";
+import { kundenAus, zeichenLimit, zeichenZahl } from "./postiz.mjs";
 import { erwartetePosts, faelligeKontrollen, abfragezeitraum, auswerten } from "./kontrolle.mjs";
 import { parseZeit, zeitText } from "./zeit.mjs";
+import { Werkstatt } from "./werkstatt.mjs";
+import { starteWeb } from "./web.mjs";
 import * as M from "./menues.mjs";
 
 const html = M.html;
 const config = ladeConfig();
 const ppicng = ladePpicng(config.ppicng.dir);
 schriftenAnmelden(ppicng);
-const auftraege = new Auftraege(config.datenDir);
-const zaehler = new AnfragenZaehler(path.join(config.datenDir, "postiz-anfragen.json"), config.postiz?.maxAnfragen ?? 0);
-const postiz = config.postiz ? new Postiz({ ...config.postiz, zaehler }) : null;
+const werkstatt = new Werkstatt({ config, ppicng });
+const { auftraege, postiz, zaehler } = werkstatt;
 
 /** @type {Record<string, TelegramPlattform|MatrixPlattform>} */
 const plattformen = {};
@@ -34,38 +33,10 @@ if (config.matrix) plattformen.matrix = new MatrixPlattform(config.matrix, confi
 
 const chatKey = (plattform, chat) => `${plattform}|${chat}`;
 const von = (a) => plattformen[a.plattform];
-
-// ---------- Warteschlange: immer nur ein ffmpeg/Whisper gleichzeitig (der Pi dankt) ----------
-
-let schlange = Promise.resolve();
-let wartend = 0;
-function arbeit(fn) {
-  wartend++;
-  const lauf = schlange.then(fn).finally(() => wartend--);
-  schlange = lauf.catch(() => {});
-  return lauf;
-}
-
-// ---------- Postiz-Kanäle (5 Minuten zwischengespeichert, Postiz zählt jede Anfrage) ----------
-
-let kanalCache = { zeit: 0, liste: [] };
-async function alleKanaele() {
-  if (!postiz) return [];
-  if (Date.now() - kanalCache.zeit > 5 * 60e3) kanalCache = { zeit: Date.now(), liste: await postiz.kanaele() };
-  return kanalCache.liste;
-}
-
-/** Kanäle des gewählten Kunden, die zur Art des Beitrags passen. */
-async function kanaeleFuer(a) {
-  const art = a.art === "video" ? "video" : "foto";
-  return passendeKanaele(kanaeleVonKunde(await alleKanaele(), a.kunde), art);
-}
-
-async function standardKanaele(a) {
-  const moeglich = await kanaeleFuer(a);
-  const vorgabe = config.postiz.kanaele.length ? moeglich.filter((c) => config.postiz.kanaele.some((e) => passtZu(c, e))) : moeglich;
-  return (vorgabe.length ? vorgabe : moeglich).map((c) => c.id);
-}
+const arbeit = (fn) => werkstatt.arbeit(fn);
+const alleKanaele = () => werkstatt.alleKanaele();
+const standardKanaele = (a) => werkstatt.standardKanaele(a);
+const srtDatei = (a) => werkstatt.srtDatei(a);
 
 // ---------- Kontext für die Menüs ----------
 
@@ -77,7 +48,9 @@ async function kontext(a) {
     postiz: Boolean(postiz),
     ki: Boolean(config.caption.anbieter),
     whisper: Boolean(config.whisper),
+    gesicht: werkstatt.gesichtAktiv,
     ppicngUrl: config.ppicng.url,
+    webUrl: config.web?.url,
     standardLogo: std.logo,
     standardBauchbinde: std.bauchbinde,
     kanaele: [],
@@ -88,7 +61,7 @@ async function kontext(a) {
       const alle = await alleKanaele();
       ctx.kanaele = alle;
       ctx.kunden = kundenAus(alle);
-      ctx.kanaeleAuswahl = await kanaeleFuer(a);
+      ctx.kanaeleAuswahl = await werkstatt.kanaeleFuer(a);
     } catch (e) {
       ctx.postizFehler = e.message;
     }
@@ -114,41 +87,7 @@ async function hauptmenu(a, o) {
 // ---------- Neuer Auftrag ----------
 
 function neuerAuftrag(ereignis, art) {
-  const std = chatStandard(config, ereignis.chat);
-  const a = auftraege.neu(chatKey(ereignis.plattform, ereignis.chat));
-  return auftraege.aendern(a.id, {
-    plattform: ereignis.plattform,
-    chat: ereignis.chat,
-    art,
-    status: "arbeitet",
-    von: ereignis.nutzerName,
-    e: {
-      design: std.design,
-      logo: std.logo,
-      logoStil: std.logoStil,
-      logoPosition: std.logoPosition,
-      logoBreite: std.logoBreite,
-      format: std.format,
-      anpassen: std.anpassen,
-      untertitel: std.untertitel && Boolean(config.whisper),
-      untertitelStil: std.untertitelStil,
-      untertitelLage: "unten",
-      bauchbinde: std.bauchbinde,
-      bauchbindeAn: std.bauchbindeAn && Boolean(std.bauchbinde?.name),
-      titelkarte: null,
-      abspannAn: std.abspannAn,
-      abspann: null,
-      abspannText: std.abspannText,
-      sharepicFormat: std.sharepicFormat,
-      claim: "",
-      text: "",
-      bild: null,
-      bildStil: "geteilt",
-    },
-    absender: std.absender,
-    hashtags: std.hashtags,
-    kundeName: std.postizKunde,
-  });
+  return werkstatt.neu({ plattform: ereignis.plattform, chat: ereignis.chat, art, von: ereignis.nutzerName });
 }
 
 async function status(a, text) {
@@ -162,7 +101,7 @@ async function status(a, text) {
   auftraege.aendern(a.id, { statusNachricht: await p.senden(a.chat, text) });
 }
 
-const schlangenHinweis = () => (wartend > 0 ? ` (in der Warteschlange: ${wartend} vor dir)` : "");
+const schlangenHinweis = () => (werkstatt.wartend > 0 ? ` (in der Warteschlange: ${werkstatt.wartend} vor dir)` : "");
 
 async function videoEmpfangen(ereignis) {
   const p = plattformen[ereignis.plattform];
@@ -171,23 +110,14 @@ async function videoEmpfangen(ereignis) {
   try {
     const original = path.join(a.ordner, `original${path.extname(ereignis.medium.name) || ".mp4"}`);
     await p.herunterladen(ereignis.medium, original);
-    const quelle = await untersuche(original);
-    auftraege.aendern(a.id, { quelle: { datei: original, ...quelle }, notizen: ereignis.text });
+    await werkstatt.videoAnnehmen(a, original, ereignis.text);
     await arbeit(async () => {
-      if (a.e.untertitel) {
-        try {
-          await untertitelErkennen(a);
-        } catch (e) {
-          console.error(`Auftrag ${a.id}: Spracherkennung`, e);
-          a.e.untertitel = false;
-          auftraege.aendern(a.id, { e: a.e });
-          await von(a).senden(a.chat, `⚠️ Spracherkennung fehlgeschlagen, das Video kommt ohne Untertitel:\n<code>${html(e.message).slice(0, 500)}</code>`);
-        }
-      }
-      await captionErzeugen(a);
-      await bauen(a);
+      const warnungen = await werkstatt.analysieren(a, (t) => status(a, t));
+      for (const w of warnungen) await p.senden(a.chat, `⚠️ ${html(w)}`);
+      await werkstatt.captionErzeugen(a);
+      await werkstatt.bauen(a, (t) => status(a, t));
     });
-    await kanaeleVorwaehlen(a);
+    await werkstatt.kanaeleVorwaehlen(a);
     await zeigen(a);
   } catch (e) {
     await fehlschlag(a, e);
@@ -229,9 +159,9 @@ async function sharepicEmpfangen(ereignis, eingabe) {
 
 async function sharepicStarten(a) {
   try {
-    await captionErzeugen(a);
-    await bauen(a);
-    await kanaeleVorwaehlen(a);
+    await werkstatt.captionErzeugen(a);
+    await werkstatt.bauen(a);
+    await werkstatt.kanaeleVorwaehlen(a);
     await zeigen(a);
   } catch (e) {
     await fehlschlag(a, e);
@@ -242,106 +172,6 @@ async function fehlschlag(a, e) {
   console.error(`Auftrag ${a.id}:`, e);
   auftraege.aendern(a.id, { status: "fehler" });
   await von(a).senden(a.chat, `❌ Das hat nicht geklappt:\n<code>${html(e.message).slice(0, 1500)}</code>`).catch(() => {});
-}
-
-async function kanaeleVorwaehlen(a) {
-  if (!postiz || a.kanaele) return;
-  try {
-    const kunde = a.kundeName ? findeKunde(await alleKanaele(), a.kundeName) : null;
-    auftraege.aendern(a.id, { kunde: kunde?.id ?? null });
-    auftraege.aendern(a.id, { kanaele: await standardKanaele(a) });
-  } catch (e) {
-    auftraege.aendern(a.id, { kanaele: [], captionHinweis: `Postiz nicht erreichbar: ${e.message}` });
-  }
-}
-
-// ---------- Inhalt erzeugen ----------
-
-const srtDatei = (a) => path.join(a.ordner, "untertitel.srt");
-
-async function untertitelErkennen(a) {
-  if (!config.whisper || !a.quelle?.hatTon) return;
-  await status(a, "🎙️ Spracherkennung läuft …");
-  const wav = path.join(a.ordner, "ton.wav");
-  await tonFuerWhisper(a.quelle.datei, wav);
-  const cues = await transkribiere(wav, config.whisper, config.glossar);
-  await fsp.rm(wav, { force: true });
-  await fsp.writeFile(srtDatei(a), formatSrt(cues));
-  auftraege.aendern(a.id, { hatUntertitel: cues.length > 0, transkript: volltext(cues) });
-}
-
-async function captionErzeugen(a, hinweis = "") {
-  const material = { art: a.art, transkript: a.transkript ?? "", notizen: a.notizen ?? "", bisher: a.caption ?? "", bilder: [] };
-  if (a.art === "sharepic") material.notizen = [a.e.claim, a.e.text, a.notizen].filter(Boolean).join("\n");
-  if (config.caption.anbieter && a.art === "sharepic" && a.e.bild) {
-    const ki = path.join(a.ordner, "ki.jpg");
-    await fotoFuerKi(a.e.bild, ki);
-    material.bilder.push(ki);
-  }
-  const o = { ...config.caption, absender: a.absender, hashtags: a.hashtags };
-  const v = await captionVorschlag(material, o, hinweis);
-  // Für Sharepics ohne KI: Claim und Erklärtext als Text, dazu die Hashtags
-  let text = v.text;
-  if (a.art === "sharepic" && v.quelle !== "ki") text = [a.e.claim, a.e.text, a.hashtags].filter(Boolean).join("\n\n");
-  auftraege.aendern(a.id, {
-    caption: text,
-    captions: {},
-    captionHinweis: v.fehler ? `KI nicht erreichbar (${v.fehler}) – einfacher Vorschlag.` : "",
-  });
-}
-
-/** Fertige Datei bauen (Video oder PNG) und eine Vorschau für den Chat. */
-async function bauen(a) {
-  const schema = farbschema(a.e.design);
-  const logo = a.e.logo === "kein" ? null : logoNachId(ppicng, a.e.logo);
-  if (a.e.logo !== "kein" && !logo) throw new Error(`Logo „${a.e.logo}“ gibt es in ppicng nicht – mit /logo suchen.`);
-
-  if (a.art === "sharepic") {
-    const masse = FORMATE[a.e.sharepicFormat] ?? FORMATE["1:1"];
-    const png = a.e.bild && a.e.bildStil === "logo"
-      ? await fotoMitLogo({ ...masse, bild: a.e.bild, logo, schema, logoBreite: a.e.logoBreite, stil: a.e.logoStil, position: a.e.logoPosition })
-      : await sharepic({ ...masse, schema, claim: a.e.claim, text: a.e.text, logo, bild: a.e.bild, bildPosition: a.e.bild ? (a.e.bildStil === "hintergrund" ? "hintergrund" : undefined) : undefined });
-    const datei = path.join(a.ordner, "sharepic.png");
-    await fsp.writeFile(datei, png);
-    auftraege.aendern(a.id, { ergebnis: datei, vorschauDatei: datei, masse, geaendert: false, status: "bereit", medium: null });
-  } else {
-    await status(a, `🎬 Baue das Video${schlangenHinweis()} …`);
-    if (a.e.untertitel && !fs.existsSync(srtDatei(a))) await untertitelErkennen(a);
-    const masse = zielMasse(a.e.format, a.quelle);
-    let ass = null;
-    if (a.e.untertitel && fs.existsSync(srtDatei(a))) {
-      const cues = parseSrt(await fsp.readFile(srtDatei(a), "utf8"));
-      if (cues.length) {
-        ass = path.join(a.ordner, "untertitel.ass");
-        const box = a.e.untertitelStil === "box";
-        await fsp.writeFile(ass, zuAss(cues, {
-          ...masse,
-          schrift: "DejaRip",
-          farbe: box ? schema.schrift : "#FFFFFF",
-          rand: box ? schema.hintergrund : "#000000",
-          stil: a.e.untertitelStil,
-          position: 0.33,
-          positionQuer: 0.08,
-          lage: a.e.untertitelLage === "unten" ? undefined : a.e.untertitelLage,
-          zeilen: 1,
-        }));
-      }
-    }
-    const ausgabe = path.join(a.ordner, "fertig.mp4");
-    const fertig = await rendern({
-      eingabe: a.quelle.datei, ausgabe, quelle: a.quelle, e: a.e, schema, logo, ass,
-      fontsDir: path.dirname(ppicng.schriften.fett), zeiten: config.zeiten, video: config.video,
-    });
-    const klein = path.join(a.ordner, "vorschau.mp4");
-    await vorschau(ausgabe, klein);
-    const info = await untersuche(ausgabe);
-    auftraege.aendern(a.id, { ergebnis: ausgabe, vorschauDatei: klein, masse: fertig, dauer: info.dauer, geaendert: false, status: "bereit", medium: null });
-  }
-  if (config.ausgabeOrdner) {
-    await fsp.mkdir(config.ausgabeOrdner, { recursive: true });
-    const name = `${new Date().toISOString().slice(0, 10)}-${a.id}${path.extname(a.ergebnis)}`;
-    await fsp.copyFile(a.ergebnis, path.join(config.ausgabeOrdner, name));
-  }
 }
 
 /** Vorschau schicken, darunter das Hauptmenü. */
@@ -359,7 +189,7 @@ async function zeigen(a) {
 async function neuBauen(a) {
   auftraege.aendern(a.id, { status: "arbeitet" });
   try {
-    await arbeit(() => bauen(a));
+    await arbeit(() => werkstatt.bauen(a, (t) => status(a, t)));
     await zeigen(a);
   } catch (e) {
     await fehlschlag(a, e);
@@ -368,32 +198,18 @@ async function neuBauen(a) {
 
 // ---------- Posten ----------
 
-/** Zu lange Texte je Kanal; null, wenn alles passt. */
-function zuLang(a, kanaele) {
-  const eigene = postiz.eigeneEinstellungen();
-  const probleme = [];
-  for (const c of kanaele) {
-    const max = zeichenLimit(c, eigene);
-    const text = a.captions?.[c.id] ?? a.caption;
-    const n = zeichenZahl(text, c.identifier);
-    if (max && n > max) probleme.push({ c, n, max });
-  }
-  return probleme.length ? probleme : null;
-}
-
 async function posten(a, zeit) {
   const p = von(a);
   const kanaele = (await alleKanaele()).filter((c) => a.kanaele.includes(c.id));
   if (!kanaele.length) return p.senden(a.chat, "Keine Kanäle gewählt – unter 📺 Kanäle auswählen.");
-  const probleme = zuLang(a, kanaele);
+  const probleme = werkstatt.zuLang(a, kanaele);
   if (probleme) {
     return menuZeigen(a, {
       text: `✂️ Der Text ist zu lang für:\n${probleme.map((x) => `• ${html(x.c.name)}: ${x.n}/${x.max}`).join("\n")}`,
       knoepfe: [[{ text: "✂️ Automatisch kürzen", daten: `${a.id}:kuerzen` }], [{ text: "✏️ Text ändern", daten: `${a.id}:caption` }], [{ text: "⬅️ Zurück", daten: `${a.id}:menu` }]],
     });
   }
-  const bedarf = Postiz.bedarf({ medien: 1, hochgeladen: Boolean(a.medium), story: false, kanaele });
-  const frei = zaehler.wiederFrei(bedarf);
+  const frei = werkstatt.wiederFrei(a);
   if (frei) {
     return p.senden(a.chat, frei === Infinity
       ? "Postiz-Anfragenlimit zu klein für diesen Beitrag (POSTIZ_MAX_ANFRAGEN)."
@@ -402,22 +218,8 @@ async function posten(a, zeit) {
   auftraege.aendern(a.id, { status: "arbeitet" });
   await status(a, "📤 Lade zu Postiz hoch …");
   try {
-    const medium = a.medium ?? (await postiz.hochladen(a.ergebnis));
-    auftraege.aendern(a.id, { medium });
-    const ergebnis = await postiz.beitrag({
-      typ: zeit ? "schedule" : "now",
-      zeit: zeit ?? new Date(),
-      caption: a.caption,
-      captions: a.captions ?? {},
-      medien: [medium],
-      kanaele,
-    });
-    auftraege.aendern(a.id, {
-      status: zeit ? "geplant" : "gepostet",
-      postiz: ergebnis,
-      plan: zeit ? { zeit: zeit.toISOString() } : null,
-      statusNachricht: null,
-    });
+    await werkstatt.posten(a, zeit);
+    auftraege.aendern(a.id, { statusNachricht: null });
     await menuZeigen(a, {
       text: zeit
         ? `🕐 Geplant für ${zeitText(zeit)} auf ${html(kanaele.map((c) => c.name).join(", "))}. Ändern geht im Postiz-Kalender.`
@@ -499,7 +301,7 @@ async function knopf(ereignis) {
       auftraege.aendern(a.id, { e, geaendert: true });
       return menuZeigen(a, M.untertitelMenu(a, ctx));
     case "lage": {
-      const lagen = Object.keys(M.LAGEN);
+      const lagen = Object.keys(M.LAGEN).filter((l) => l !== "auto" || ctx.gesicht);
       Object.assign(e, { untertitelLage: lagen[(lagen.indexOf(e.untertitelLage) + 1) % lagen.length] });
       auftraege.aendern(a.id, { e, geaendert: true });
       return menuZeigen(a, M.untertitelMenu(a, ctx));
@@ -661,7 +463,7 @@ async function eingabe(a, ereignis) {
     case "ki":
       auftraege.aendern(a.id, { wartetAuf: null });
       await p.senden(a.chat, "🔄 Formuliere neu …");
-      await captionErzeugen(a, text);
+      await werkstatt.captionErzeugen(a, text);
       return hauptmenu(a, { neu: true });
     case "logo": {
       const treffer = sucheLogos(ppicng, text);
@@ -706,7 +508,7 @@ async function eingabe(a, ereignis) {
 
 async function befehl(ereignis, name, rest) {
   const p = plattformen[ereignis.plattform];
-  const ctx = { plattform: ereignis.plattform, postiz: Boolean(postiz), ppicngUrl: config.ppicng.url };
+  const ctx = { plattform: ereignis.plattform, postiz: Boolean(postiz), ppicngUrl: config.ppicng.url, webUrl: config.web?.url };
   switch (name) {
     case "start":
     case "hilfe":
@@ -764,7 +566,9 @@ async function statusText() {
   if (postiz) await pruef("Postiz", async () => `${(await postiz.kanaele()).length} Kanäle, ${zaehler.anzahl()} Anfragen in der letzten Stunde`);
   else zeilen.push("➖ Postiz: nicht angebunden (nur Datei-Download)");
   zeilen.push(config.caption.anbieter ? `✅ KI: ${config.caption.anbieter} (${config.caption.modell})` : "➖ KI: aus (einfache Textvorschläge)");
-  zeilen.push(`ℹ️ Plattformen: ${Object.keys(plattformen).join(", ")} · Warteschlange: ${wartend}`);
+  zeilen.push(werkstatt.gesichtAktiv ? "✅ Gesichtssuche: OpenCV" : "➖ Gesichtssuche: aus (Python mit OpenCV fehlt, GESICHT_PYTHON)");
+  if (config.web) zeilen.push(`✅ Web-Version: ${html(config.web.url ?? `Port ${config.web.port}`)}`);
+  zeilen.push(`ℹ️ Plattformen: ${Object.keys(plattformen).join(", ") || "keine"} · Warteschlange: ${werkstatt.wartend}`);
   return zeilen.join("\n");
 }
 
@@ -834,7 +638,11 @@ for (const [name, p] of Object.entries(plattformen)) {
   console.log(`${name}: verbunden als ${wer}`);
   p.lauschen(verarbeiten);
 }
-console.log(`ppicng: ${ppicng.logos.length} Logos · Postiz: ${postiz ? "an" : "aus"} · Whisper: ${config.whisper ? "an" : "aus"} · KI: ${config.caption.anbieter ?? "aus"}`);
+if (config.web) {
+  const adresse = await starteWeb({ config, werkstatt });
+  console.log(`web: ${adresse}`);
+}
+console.log(`ppicng: ${ppicng.logos.length} Logos · Postiz: ${postiz ? "an" : "aus"} · Whisper: ${config.whisper ? "an" : "aus"} · Gesicht: ${werkstatt.gesichtAktiv ? "an" : "aus"} · KI: ${config.caption.anbieter ?? "aus"}`);
 
 // Aufträge, die beim letzten Beenden mitten in der Arbeit waren, als Fehler markieren
 for (const a of Object.values(auftraege.alle)) if (a.status === "arbeitet") auftraege.aendern(a.id, { status: "fehler" });

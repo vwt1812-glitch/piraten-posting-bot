@@ -15,7 +15,8 @@ export const BILDSTILE = {
   hintergrund: "Foto als Hintergrund",
   logo: "nur Logo aufs Foto",
 };
-export const LAGEN = { unten: "unten", mitte: "Mitte", oben: "oben" };
+export const LAGEN = { auto: "automatisch", unten: "unten", mitte: "Mitte", oben: "oben" };
+const LAGE_TEXT = { unten: "unten", mitte: "in der Mitte", oben: "oben" };
 
 const anAus = (x) => (x ? "an" : "aus");
 
@@ -49,6 +50,10 @@ export function hauptMenu(a, ctx) {
     "",
     a.caption ? html(a.caption) : "<i>(noch kein Beitragstext)</i>",
   ];
+  if (a.art === "video" && a.e.untertitel && a.lageAutomatisch && a.lage && a.lage !== "unten") {
+    zeilen.push("", `📍 Untertitel ${LAGE_TEXT[a.lage]} – unten hätten sie das Gesicht verdeckt.`);
+  }
+  if (a.art === "video") for (const h of a.gesichtHinweise ?? []) zeilen.push(`💡 ${html(h)}`);
   if (a.captionHinweis) zeilen.push("", `<i>${html(a.captionHinweis)}</i>`);
   if (ctx.postiz && a.kanaele) {
     const namen = ctx.kanaele.filter((c) => a.kanaele.includes(c.id)).map((c) => c.name);
@@ -150,6 +155,7 @@ export function untertitelMenu(a, ctx) {
     text += `Automatisch erkannt (whisper.cpp, lokal). Korrekturen als <code>falsch => richtig</code> schicken, eine pro Zeile – oder die korrigierte <code>.srt</code>-Datei.`;
     knoepfe.push([k(a, "ut", e.untertitel ? "🔇 Ausschalten" : "🔊 Einschalten", e.untertitel ? "aus" : "an")]);
     knoepfe.push([k(a, "lage", `📍 Lage: ${LAGEN[e.untertitelLage] ?? "unten"}`), k(a, "utstil", e.untertitelStil === "box" ? "▭ Stil: Fläche" : "🅰️ Stil: Kontur")]);
+    if (ctx.gesicht) text += "\n📍 „automatisch“ legt sie hochkant dorthin, wo sie das Gesicht nicht verdecken.";
   }
   if (a.hatUntertitel) knoepfe.push([k(a, "srt", "📄 SRT-Datei schicken")]);
   knoepfe.push([k(a, "korrektur", "✏️ Korrigieren / SRT hochladen")]);
@@ -245,6 +251,7 @@ export function hilfe(ctx) {
   if (ctx.plattform === "matrix") zeilen.push("", "Auswahl: Reaktion 1️⃣ 2️⃣ 3️⃣ … antippen oder die Zahl schicken.");
   if (ctx.plattform === "telegram") zeilen.push("", "Videos am besten <b>als Datei</b> schicken (📎 → Datei), sonst komprimiert Telegram sie.");
   zeilen.push(ctx.postiz ? "Posten und Planen geht über Postiz." : "Postiz ist nicht angebunden – die fertige Datei gibt es mit „📥 Fertige Datei“.");
+  if (ctx.webUrl) zeilen.push(`🌐 Lieber im Browser? ${html(ctx.webUrl)}`);
   if (ctx.ppicngUrl) zeilen.push(`ppicng im Browser: ${html(ctx.ppicngUrl)}`);
   return zeilen.join("\n");
 }
