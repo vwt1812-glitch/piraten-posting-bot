@@ -16,7 +16,7 @@ export const BILDSTILE = {
   logo: "nur Logo aufs Foto",
 };
 export const LAGEN = { auto: "automatisch", unten: "unten", mitte: "Mitte", oben: "oben" };
-const LAGE_TEXT = { unten: "unten", mitte: "in der Mitte", oben: "oben" };
+const LAGE_TEXT = { unten: "unten", mitte: "in der Mitte", oben: "oben", "unter-bild": "direkt unter dem Bild" };
 
 const anAus = (x) => (x ? "an" : "aus");
 
@@ -51,9 +51,13 @@ export function hauptMenu(a, ctx) {
     a.caption ? html(a.caption) : "<i>(noch kein Beitragstext)</i>",
   ];
   if (a.art === "video" && a.e.untertitel && a.lageAutomatisch && a.lage && a.lage !== "unten") {
-    zeilen.push("", `📍 Untertitel ${LAGE_TEXT[a.lage]} – unten hätten sie das Gesicht verdeckt.`);
+    zeilen.push("", a.lage === "unter-bild"
+      ? "📍 Untertitel direkt unter dem Bild, das Logo darüber – so verdecken sie nichts."
+      : `📍 Untertitel ${LAGE_TEXT[a.lage]} – unten hätten sie das Gesicht verdeckt.`);
   }
   if (a.art === "video") for (const h of a.gesichtHinweise ?? []) zeilen.push(`💡 ${html(h)}`);
+  if (a.art === "video" && a.e.hochkant && a.hochkantDatei) zeilen.push("📲 Instagram/TikTok bekommen die 9:16-Fassung, die anderen dieses Format.");
+  if (ctx.postiz && a.e.story) zeilen.push("📱 Zusätzlich als Story auf Instagram/Facebook.");
   if (a.captionHinweis) zeilen.push("", `<i>${html(a.captionHinweis)}</i>`);
   if (ctx.postiz && a.kanaele) {
     const namen = ctx.kanaele.filter((c) => a.kanaele.includes(c.id)).map((c) => c.name);
@@ -68,6 +72,7 @@ export function hauptMenu(a, ctx) {
   if (ctx.postiz) {
     const reihe = [k(a, "kanaele", `📺 Kanäle (${a.kanaele?.length ?? 0})`)];
     if (ctx.kunden?.length) reihe.push(k(a, "kunde", "👤 Kunde"));
+    reihe.push(k(a, "st", a.e.story ? "📱 Story ✓" : "📱 Story"));
     knoepfe.push(reihe);
   }
   if (ctx.webUrl && a.freigabe) {
@@ -84,7 +89,10 @@ export function gestaltungMenu(a, ctx) {
     knoepfe.push([k(a, "format", `📐 Format: ${e.format === "original" ? "Original" : e.format}`)]);
     knoepfe.push([k(a, "untertitel", `📝 Untertitel: ${anAus(e.untertitel)}`), k(a, "bauchbinde", `🪪 Bauchbinde: ${anAus(e.bauchbindeAn && e.bauchbinde?.name)}`)]);
     knoepfe.push([k(a, "titelkarte", `🎬 Titelkarte: ${anAus(e.titelkarte)}`), k(a, "abspann", `🏁 Abspann: ${anAus(e.abspannAn)}`)]);
-    knoepfe.push([k(a, "ton", `🔊 Ton${e.ton?.musik ? " · 🎵" : ""}`)]);
+    const reihe = [k(a, "ton", `🔊 Ton${e.ton?.musik ? " · 🎵" : ""}`)];
+    // Querformat: zusätzlich eine 9:16-Fassung für Instagram/TikTok (wie im Stadtrat-Bot)
+    if (!ctx.istHochkant) reihe.push(k(a, "hk", `📲 9:16 für Insta: ${anAus(e.hochkant)}`));
+    knoepfe.push(reihe);
   } else {
     knoepfe.push([k(a, "format", `📐 Format: ${e.sharepicFormat}`)]);
     knoepfe.push([k(a, "claim", "💬 Claim ändern"), k(a, "erklaertext", `📄 Erklärtext: ${anAus(e.text)}`)]);
@@ -156,13 +164,13 @@ export function untertitelMenu(a, ctx) {
   if (!ctx.whisper && !a.hatUntertitel) {
     text += "Spracherkennung ist nicht eingerichtet (WHISPER_MODELL). Du kannst aber eine <code>.srt</code>-Datei schicken.";
   } else {
-    text += `Automatisch erkannt (whisper.cpp, lokal). Korrekturen als <code>falsch => richtig</code> schicken, eine pro Zeile – oder die korrigierte <code>.srt</code>-Datei.`;
+    text += "Automatisch erkannt (whisper.cpp, lokal). Unter „Untertitel bearbeiten“ bekommst du sie als nummerierte Liste zum Korrigieren.";
     knoepfe.push([k(a, "ut", e.untertitel ? "🔇 Ausschalten" : "🔊 Einschalten", e.untertitel ? "aus" : "an")]);
     knoepfe.push([k(a, "lage", `📍 Lage: ${LAGEN[e.untertitelLage] ?? "unten"}`), k(a, "utstil", e.untertitelStil === "box" ? "▭ Stil: Fläche" : "🅰️ Stil: Kontur")]);
     if (ctx.gesicht) text += "\n📍 „automatisch“ legt sie hochkant dorthin, wo sie das Gesicht nicht verdecken.";
   }
   if (a.hatUntertitel) knoepfe.push([k(a, "srt", "📄 SRT-Datei schicken")]);
-  knoepfe.push([k(a, "korrektur", "✏️ Korrigieren / SRT hochladen")]);
+  knoepfe.push([k(a, "korrektur", a.hatUntertitel ? "✏️ Untertitel bearbeiten (Liste)" : "📄 SRT-Datei hochladen")]);
   knoepfe.push(zurueck(a));
   return { text, knoepfe };
 }

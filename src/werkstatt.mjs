@@ -9,13 +9,13 @@ import { chatStandard } from "./config.mjs";
 import { Auftraege } from "./auftraege.mjs";
 import { logoNachId, farbschema } from "./ppicng.mjs";
 import { sharepic, fotoMitLogo, eigenesBild } from "./grafik.mjs";
-import { tonUntersuchen, untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie } from "./video.mjs";
+import { bildBand, positionUnterBild, tonUntersuchen, untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie } from "./video.mjs";
 import { transkribiere } from "./whisper.mjs";
-import { parseSrt, formatSrt, zuAss, volltext, wendeKorrekturenAn } from "./untertitel.mjs";
+import { parseSrt, formatSrt, zuAss, volltext, wendeKorrekturenAn, alsListe, wendeBearbeitungAn } from "./untertitel.mjs";
 import { ganzerClip, schnittCues, cuesZurueck, schnittDauer, imClip } from "./schnitt.mjs";
 import { captionVorschlag } from "./caption.mjs";
 import { gesichtSuchen, lageFuer } from "./gesicht.mjs";
-import { Postiz, AnfragenZaehler, passendeKanaele, passtZu, findeKunde, kanaeleVonKunde, zeichenLimit, zeichenZahl } from "./postiz.mjs";
+import { Postiz, STORY, AnfragenZaehler, passendeKanaele, passtZu, findeKunde, kanaeleVonKunde, zeichenLimit, zeichenZahl } from "./postiz.mjs";
 
 export class Werkstatt {
   constructor({ config, ppicng }) {
@@ -68,6 +68,9 @@ export class Werkstatt {
         sharepicFormat: std.sharepicFormat,
         // Ton: Lautheit angleichen (für Social Media), Rauschminderung, Hintergrundmusik
         ton: { angleichen: std.tonAngleichen, rauschen: std.tonRauschen, musik: null },
+        // Zusätzliche 9:16-Fassung für Instagram/TikTok (bei Videos, die nicht 9:16 sind) und Story
+        hochkant: std.hochkant,
+        story: std.story,
         claim: "",
         text: "",
         bild: null,
@@ -194,6 +197,33 @@ export class Werkstatt {
 
   korrigieren(a, korrekturen) {
     this.cuesSchreiben(a, wendeKorrekturenAn(this.cues(a), korrekturen));
+  }
+
+  /** Untertitel des fertigen Schnitts als nummerierte Liste (Teile für Chat-Nachrichten). */
+  untertitelListe(a, maxLaenge) {
+    return alsListe(this.ausgabeCues(a), maxLaenge);
+  }
+
+  /**
+   * Bearbeitete Liste übernehmen (siehe wendeBearbeitungAn) und auf die Untertitel der Clips zurückrechnen.
+   * Kommt ein Untertitel im Schnitt mehrmals vor (Clip zweimal verwendet), gilt die Änderung für beide; gelöscht
+   * wird er erst, wenn alle Vorkommen gelöscht sind.
+   */
+  listeBearbeiten(a, text) {
+    const aus = this.ausgabeCues(a);
+    const b = wendeBearbeitungAn(aus, text);
+    if (b.geaendert + b.geloescht + b.ersetzt === 0) return b;
+    const quelle = this.cues(a);
+    const bleiben = new Set(b.cues.map((c) => c.index));
+    const neueTexte = new Map(b.cues.map((c) => [c.index, c.text]));
+    const sichtbar = new Set(aus.map((c) => c.index));
+    const cues = quelle.flatMap((c, i) => {
+      if (!sichtbar.has(i)) return [c]; // herausgeschnitten: bleibt unverändert
+      if (!bleiben.has(i)) return [];
+      return [{ ...c, text: neueTexte.get(i) }];
+    });
+    this.cuesSchreiben(a, cues);
+    return b;
   }
 
   /** Hintergrundmusik setzen (Datei liegt schon im Auftragsordner und ist geprüft). */
@@ -328,7 +358,11 @@ export class Werkstatt {
   async #untertitel(a, e, schema, masse, ordner) {
     const benutzt = new Set(this.schnitt(a).map((t) => t.clip));
     const quellen = this.clips(a).filter((c) => benutzt.has(c.id)).map((c) => ({ funde: c.gesichter, quelle: c }));
-    const lage = lageFuer({ e, quellen, masse });
+    let lage = lageFuer({ e, quellen, masse });
+    // Querformat mit Rand auf 9:16: Untertitel direkt unter dem Bild – dort verdecken sie kein Gesicht.
+    // Eine von Hand gewählte Lage (oben/Mitte) geht vor.
+    const unterBild = ["auto", "unten"].includes(e.untertitelLage ?? "unten") ? positionUnterBild(bildBand(this.#teile(a), masse, e.anpassen), masse) : null;
+    if (unterBild) lage = { lage: "unter-bild", automatisch: true, hinweise: [] };
     const cues = e.untertitel ? this.ausgabeCues(a) : [];
     if (!cues.length) return { ass: null, lage };
     const ass = path.join(ordner, "untertitel.ass");
@@ -339,40 +373,78 @@ export class Werkstatt {
       farbe: box ? schema.schrift : "#FFFFFF",
       rand: box ? schema.hintergrund : "#000000",
       stil: e.untertitelStil,
-      position: 0.33,
-      positionQuer: 0.08,
-      lage: lage.lage === "unten" ? undefined : lage.lage,
+      position: unterBild ?? 0.33,
+      positionQuer: unterBild ?? 0.08,
+      lage: ["unten", "unter-bild"].includes(lage.lage) ? undefined : lage.lage,
       zeilen: 1,
     }));
     return { ass, lage };
   }
 
-  /** Fertige Datei bauen (Video oder PNG) samt Vorschau. Gehört in die Warteschlange. */
+  // ---------- 9:16-Fassung und Story ----------
+  // Ist das Video nicht 9:16, kann es zusätzlich eine 9:16-Fassung bekommen: für Instagram/TikTok
+  // („hochkant“, die anderen Netzwerke bekommen das eigentliche Format) und/oder als Story.
+
+  /** Ist das fertige Video ohnehin schon 9:16? */
+  istHochkant(a, e = a.e) {
+    const m = zielMasse(e.format, this.ersterClip(a));
+    return Math.abs(m.hoehe / m.breite - 16 / 9) < 0.03;
+  }
+
+  /** Braucht der Beitrag eine eigene 9:16-Fassung? */
+  brauchtZweitfassung(a, e = a.e) {
+    if (a.art === "sharepic") return Boolean(e.story) && e.sharepicFormat !== "9:16";
+    return Boolean(e.hochkant || e.story) && !this.istHochkant(a, e);
+  }
+
+  /** Ein Video rendern (Haupt- oder 9:16-Fassung) samt kleiner Vorschau. */
+  async #videoRendern(a, e, { name, schritt }) {
+    const { schema, logo } = this.#design(e);
+    const ordner = name === "fertig" ? a.ordner : path.join(a.ordner, name);
+    await fsp.mkdir(ordner, { recursive: true });
+    const masse = zielMasse(e.format, this.ersterClip(a));
+    const { ass, lage } = await this.#untertitel(a, e, schema, masse, ordner);
+    const ausgabe = path.join(a.ordner, `${name}.mp4`);
+    await schritt(name === "fertig"
+      ? `🎬 Baue das Video (${Math.round(schnittDauer(this.schnitt(a)))} s) …`
+      : "📲 Baue die 9:16-Fassung für Instagram/TikTok …");
+    const fertig = await rendern({
+      teile: this.#teile(a), ausgabe, e: { ...e, untertitelLage: lage.lage }, schema, logo, ass,
+      fontsDir: path.dirname(this.ppicng.schriften.fett), zeiten: this.config.zeiten, video: this.config.video,
+    });
+    const klein = path.join(a.ordner, `vorschau${name === "fertig" ? "" : `-${name}`}.mp4`);
+    await vorschau(ausgabe, klein);
+    const info = await untersuche(ausgabe);
+    return { ausgabe, klein, masse: fertig, dauer: info.dauer, lage };
+  }
+
+  /** Fertige Datei bauen (Video oder PNG) samt Vorschau – und, wenn gewünscht, die 9:16-Fassung. Gehört in die Warteschlange. */
   async bauen(a, schritt = () => {}) {
-    const { schema, logo } = this.#design(a.e);
+    const zurueck = { medium: null, hochkantMedium: null, hochkantDatei: null, hochkantVorschau: null };
     if (a.art === "sharepic") {
       const { png, masse } = await this.sharepicPng(a);
       const datei = path.join(a.ordner, "sharepic.png");
       await fsp.writeFile(datei, png);
-      this.aendern(a, { ergebnis: datei, vorschauDatei: datei, masse, geaendert: false, status: "bereit", medium: null });
+      if (this.brauchtZweitfassung(a)) {
+        // Story: dasselbe Sharepic im Format 9:16
+        const story = path.join(a.ordner, "sharepic-916.png");
+        await fsp.writeFile(story, (await this.sharepicPng(a, { ...a.e, sharepicFormat: "9:16" })).png);
+        Object.assign(zurueck, { hochkantDatei: story, hochkantVorschau: story });
+      }
+      this.aendern(a, { ergebnis: datei, vorschauDatei: datei, masse, geaendert: false, status: "bereit", ...zurueck });
     } else {
       await schritt(`🎬 Baue das Video${this.wartend > 1 ? ` (in der Warteschlange: ${this.wartend - 1} vor dir)` : ""} …`);
       if (a.e.untertitel) await this.untertitelErkennen(a, schritt);
-      const masse = zielMasse(a.e.format, this.ersterClip(a));
-      const { ass, lage } = await this.#untertitel(a, a.e, schema, masse, a.ordner);
-      const ausgabe = path.join(a.ordner, "fertig.mp4");
-      await schritt(`🎬 Baue das Video (${Math.round(schnittDauer(this.schnitt(a)))} s) …`);
-      const fertig = await rendern({
-        teile: this.#teile(a), ausgabe, e: { ...a.e, untertitelLage: lage.lage }, schema, logo, ass,
-        fontsDir: path.dirname(this.ppicng.schriften.fett), zeiten: this.config.zeiten, video: this.config.video,
-      });
+      const haupt = await this.#videoRendern(a, a.e, { name: "fertig", schritt });
+      if (this.brauchtZweitfassung(a)) {
+        // Querformat mit unscharfem Rand auf 9:16 – Logo, Bauchbinde und Untertitel am Bild ausgerichtet
+        const hoch = await this.#videoRendern(a, { ...a.e, format: "9:16", anpassen: "rand" }, { name: "fertig-916", schritt });
+        Object.assign(zurueck, { hochkantDatei: hoch.ausgabe, hochkantVorschau: hoch.klein, hochkantMasse: hoch.masse });
+      }
       await schritt("📦 Fast fertig …");
-      const klein = path.join(a.ordner, "vorschau.mp4");
-      await vorschau(ausgabe, klein);
-      const info = await untersuche(ausgabe);
       this.aendern(a, {
-        ergebnis: ausgabe, vorschauDatei: klein, masse: fertig, dauer: info.dauer, geaendert: false, status: "bereit", medium: null,
-        lage: lage.lage, lageAutomatisch: lage.automatisch, gesichtHinweise: lage.hinweise,
+        ergebnis: haupt.ausgabe, vorschauDatei: haupt.klein, masse: haupt.masse, dauer: haupt.dauer, geaendert: false, status: "bereit",
+        lage: haupt.lage.lage, lageAutomatisch: haupt.lage.automatisch, gesichtHinweise: haupt.lage.hinweise, ...zurueck,
       });
     }
     if (this.config.ausgabeOrdner) {
@@ -458,10 +530,20 @@ export class Werkstatt {
   async posten(a, zeit) {
     const kanaele = (await this.alleKanaele()).filter((c) => a.kanaele.includes(c.id));
     if (!kanaele.length) throw new Error("Keine Kanäle gewählt.");
+    const netze = this.config.hochkant.netze;
     const medium = a.medium ?? (await this.postiz.hochladen(a.ergebnis));
     this.aendern(a, { medium });
+    const story = Boolean(a.e.story) && kanaele.some((k) => STORY[k.identifier]);
+    const hochkant = a.art === "video" && Boolean(a.e.hochkant) && kanaele.some((k) => netze.includes(k.identifier));
+    // Eigene 9:16-Fassung nur hochladen, wenn es sie gibt und Story oder Hochformat-Netzwerke sie brauchen
+    let fassung = null;
+    if (a.hochkantDatei && (story || hochkant)) {
+      fassung = a.hochkantMedium ?? (await this.postiz.hochladen(a.hochkantDatei));
+      this.aendern(a, { hochkantMedium: fassung });
+    }
     const ergebnis = await this.postiz.beitrag({
       typ: zeit ? "schedule" : "now", zeit: zeit ?? new Date(), caption: a.caption, captions: a.captions ?? {}, medien: [medium], kanaele,
+      story, storyMedium: story ? fassung : null, hochkantMedium: hochkant ? fassung : null, hochkantNetze: netze,
     });
     this.aendern(a, { status: zeit ? "geplant" : "gepostet", postiz: ergebnis, plan: zeit ? { zeit: zeit.toISOString() } : null });
     return { kanaele };
@@ -469,6 +551,10 @@ export class Werkstatt {
 
   /** null, wenn Postiz jetzt genug Anfragen frei hat, sonst ab wann (Infinity: nie). */
   wiederFrei(a) {
-    return this.zaehler.wiederFrei(Postiz.bedarf({ medien: 1, hochgeladen: Boolean(a.medium), story: false, kanaele: [] }));
+    const kanaele = this.kanalCache.liste.filter((c) => a.kanaele?.includes(c.id));
+    return this.zaehler.wiederFrei(Postiz.bedarf({
+      medien: 1, hochgeladen: Boolean(a.medium), story: Boolean(a.e.story), kanaele,
+      storyUpload: Boolean(a.hochkantDatei && !a.hochkantMedium), hochkant: a.art === "video" && Boolean(a.e.hochkant), hochkantNetze: this.config.hochkant.netze,
+    }));
   }
 }

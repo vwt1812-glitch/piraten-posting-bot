@@ -167,3 +167,4 @@ summary.klein { font-size: .9rem; font-family: DejaRip, sans-serif; text-transfo
 @keyframes uebergang-schieben { from { transform: translateX(100%); } to { transform: translateX(0); } }
 @keyframes uebergang-kreis { from { clip-path: circle(0% at 50% 50%); } to { clip-path: circle(75% at 50% 50%); } }
 @media (prefers-reduced-motion: reduce) { .spieler.uebergang .schnitt-video { animation: none; } }
+.fassungen { margin-bottom: .5rem; } .fassungen > * { flex: 0 0 auto; }

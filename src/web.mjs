@@ -104,6 +104,8 @@ export function bereinigen(neu, alt, ppicng) {
   e.untertitelStil = aus(neu.untertitelStil, ["box", "rand"], alt.untertitelStil);
   e.untertitelLage = aus(neu.untertitelLage, Object.keys(LAGEN), alt.untertitelLage);
   e.bildStil = aus(neu.bildStil, Object.keys(BILDSTILE), alt.bildStil);
+  e.hochkant = jaNein(neu.hochkant, alt.hochkant ?? false);
+  e.story = jaNein(neu.story, alt.story ?? false);
   e.claim = textFeld(neu.claim, 300, alt.claim);
   e.text = textFeld(neu.text, 800, alt.text);
   e.bauchbindeAn = jaNein(neu.bauchbindeAn, alt.bauchbindeAn);
@@ -174,6 +176,9 @@ export function ansicht(a, werkstatt) {
     ergebnis: a.ergebnis && fs.existsSync(a.ergebnis) ? { version: fs.statSync(a.ergebnis).mtimeMs, masse: a.masse } : null,
     plan: a.plan ?? null,
     geaendert: Boolean(a.geaendert),
+    // 9:16-Fassung (für Instagram/TikTok bzw. Story), wenn gebaut
+    fassung916: a.hochkantDatei && fs.existsSync(a.hochkantDatei) ? { version: fs.statSync(a.hochkantDatei).mtimeMs } : null,
+    istHochkant: a.art === "video" && werkstatt.clips(a).length ? werkstatt.istHochkant(a) : a.e.sharepicFormat === "9:16",
   };
 }
 
@@ -337,6 +342,7 @@ export async function starteWeb({ config, werkstatt }) {
       lagen: Object.fromEntries(Object.entries(LAGEN).filter(([l]) => l !== "auto" || werkstatt.gesichtAktiv)),
       logos: ppicng.logos.map((l) => ({ id: l.id, titel: l.titel, gruppe: l.gruppeTitel })),
       funktionen: { whisper: Boolean(config.whisper), gesicht: werkstatt.gesichtAktiv, postiz: Boolean(werkstatt.postiz), ki: Boolean(config.caption.anbieter) },
+      hochkantNetze: config.hochkant.netze,
       ppicngUrl: config.ppicng.url,
       maxMb: w.maxMb,
     };
@@ -552,11 +558,13 @@ export async function starteWeb({ config, werkstatt }) {
         return senden(res, 200, ansicht(a, werkstatt));
       }
       case "GET datei": {
-        const name = `piraten-${a.art}-${a.id}${path.extname(a.ergebnis ?? "")}`;
-        return dateiSenden(req, res, a.ergebnis, { name, herunterladen: true });
+        const hoch = url.searchParams.get("fassung") === "916";
+        const datei = hoch ? a.hochkantDatei : a.ergebnis;
+        const name = `piraten-${a.art}-${a.id}${hoch ? "-9x16" : ""}${path.extname(datei ?? "")}`;
+        return dateiSenden(req, res, datei, { name, herunterladen: true });
       }
       case "GET vorschaudatei":
-        return dateiSenden(req, res, a.vorschauDatei);
+        return dateiSenden(req, res, url.searchParams.get("fassung") === "916" ? a.hochkantVorschau : a.vorschauDatei);
       case "GET srt":
         return dateiSenden(req, res, werkstatt.srtFuerAusgabe(a), { name: `untertitel-${a.id}.srt`, herunterladen: true });
 

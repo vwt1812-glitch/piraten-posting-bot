@@ -149,6 +149,8 @@ export function ladeConfig() {
       anpassen: env("VIDEO_ANPASSEN", "rand"),
       sharepicFormat: env("SHAREPIC_FORMAT", "1:1"),
       tonAngleichen: ja("TON_ANGLEICHEN", true),
+      hochkant: ja("HOCHKANT_STANDARD", false),
+      story: ja("STORY_STANDARD", false),
       tonRauschen: ja("TON_RAUSCHMINDERUNG", false),
       untertitel: ja("UNTERTITEL_STANDARD", true),
       untertitelStil: env("UNTERTITEL_STIL", "box"),
@@ -172,6 +174,10 @@ export function ladeConfig() {
       crf: env("VIDEO_CRF", "21"),
     },
     caption: captionConfig(),
+    // Querformat-Videos: diese Netzwerke bekommen auf Wunsch die 9:16-Fassung
+    hochkant: {
+      netze: liste("HOCHKANT_NETZE").length ? liste("HOCHKANT_NETZE") : ["instagram", "instagram-standalone", "tiktok", "tiktok-business"],
+    },
     chatsDatei: pfad(env("CHATS", "chats.json")),
     // Fertige Dateien zusätzlich hierhin kopieren, z. B. in einen Nextcloud-Ordner (optional)
     ausgabeOrdner: pfad(env("AUSGABE_ORDNER", "")),

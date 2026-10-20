@@ -769,7 +769,8 @@ async function editor(id) {
   const status = el("div");
   const aktionen = el("div");
   const formular = el("div", { class: "karte" });
-  const seitenleiste = el("div", { class: "vorschau-spalte" }, el("div", { class: "karte" }, vorschau, vorschauInfo, status, aktionen));
+  const fassungWahl = el("div");
+  const seitenleiste = el("div", { class: "vorschau-spalte" }, el("div", { class: "karte" }, fassungWahl, vorschau, vorschauInfo, status, aktionen));
   const oben = el("div");
   let platz = null;
   let standbildZeit = null;
@@ -799,7 +800,7 @@ async function editor(id) {
       const blob = await res.blob();
       if (nr !== vorschauNr) return;
       const lage = res.headers.get("X-Lage");
-      bildZeigen(blob, istVideo ? `Standbild${standbildZeit !== null ? ` bei ${zeitGenau(standbildZeit)}` : ""}${e.untertitel && lage ? ` · Untertitel ${{ unten: "unten", mitte: "Mitte", oben: "oben" }[lage]}${e.untertitelLage === "auto" ? " (automatisch)" : ""}` : ""}` : null);
+      bildZeigen(blob, istVideo ? `Standbild${standbildZeit !== null ? ` bei ${zeitGenau(standbildZeit)}` : ""}${e.untertitel && lage ? ` · Untertitel ${{ unten: "unten", mitte: "Mitte", oben: "oben", "unter-bild": "unter dem Bild" }[lage]}${e.untertitelLage === "auto" ? " (automatisch)" : ""}` : ""}` : null);
     } catch (err) {
       if (nr === vorschauNr && err.name !== "AbortError") ersetzen(vorschau, el("p", { class: "fehler" }, err.message));
     } finally {
@@ -807,7 +808,9 @@ async function editor(id) {
     }
   }, istVideo ? 1200 : 350);
 
+  const beiAenderung = []; // Teile des Formulars, die von anderen Einstellungen abhängen
   const geaendert = () => {
+    beiAenderung.forEach((f) => f());
     a.geaendert = true;
     speichern();
     vorschauLaden();
@@ -983,6 +986,34 @@ async function editor(id) {
     a = await anfrage(`auftrag/${id}`);
     if (a.status === "arbeitet") beobachten();
     else aufbauen();
+  }
+
+  /** 9:16-Fassung für Instagram/TikTok und Story – nur sinnvoll, wenn das Video nicht schon 9:16 ist. */
+  function fassungBereich() {
+    const schonHochkant = () => {
+      if (!istVideo) return e.sharepicFormat === "9:16";
+      if (e.format === "9:16") return true;
+      return e.format === "original" && a.quelle && Math.abs(a.quelle.hoehe / a.quelle.breite - 16 / 9) < 0.03;
+    };
+    const netze = optionen.hochkantNetze.some((n) => n.startsWith("tiktok")) ? "Instagram/TikTok" : "Instagram";
+    const hochkant = istVideo
+      ? el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: Boolean(e.hochkant), onchange: (ev) => setze("hochkant", ev.target.checked) }),
+        `📲 Zusätzlich eine 9:16-Fassung für ${netze} – die anderen Netzwerke bekommen dieses Format`)
+      : null;
+    const story = optionen.funktionen.postiz
+      ? el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: Boolean(e.story), onchange: (ev) => setze("story", ev.target.checked) }), "📱 Beim Posten auch als Story auf Instagram/Facebook")
+      : null;
+    const hinweis = el("p", { class: "leise" });
+    const aktualisieren = () => {
+      const schon = schonHochkant();
+      if (hochkant) hochkant.hidden = schon;
+      hinweis.textContent = schon ? "" : istVideo
+        ? "Das Querformat landet dann mittig auf einer unscharfen Kopie, Logo darüber, Bauchbinde im Bild, Untertitel darunter."
+        : e.story ? "Für die Story baue ich dasselbe Sharepic zusätzlich in 9:16." : "";
+    };
+    beiAenderung.push(aktualisieren);
+    aktualisieren();
+    return [hochkant, story, hinweis].filter(Boolean);
   }
 
   function tonBereich() {
@@ -1163,7 +1194,9 @@ async function editor(id) {
         aktuell ? "🔁 Neu bauen" : istVideo ? "🎬 Video bauen" : "💾 Fertig machen")));
     }
     if (a.ergebnis && !a.geaendert) {
-      teile.push(el("p", {}, el("a", { class: "knopf zweit", href: `/api/auftrag/${id}/datei`, download: "" }, "📥 Herunterladen")));
+      teile.push(el("p", { class: "reihe" },
+        el("a", { class: "knopf zweit", href: `/api/auftrag/${id}/datei`, download: "" }, "📥 Herunterladen"),
+        a.fassung916 ? el("a", { class: "knopf zweit", href: `/api/auftrag/${id}/datei?fassung=916`, download: "" }, istVideo ? "📥 9:16-Fassung" : "📥 Story (9:16)") : null));
     } else if (a.ergebnis) {
       teile.push(el("p", { class: "leise" }, "Geändert – zum Herunterladen und Posten neu bauen."));
     }
@@ -1190,18 +1223,32 @@ async function editor(id) {
     }
   }
 
+  let zeigeFassung = "haupt";
   function zeigeErgebnis() {
-    if (!a.ergebnis || a.geaendert) return vorschauLaden.sofort();
-    const v = a.ergebnis.version;
+    if (!a.ergebnis || a.geaendert) {
+      ersetzen(fassungWahl);
+      return vorschauLaden.sofort();
+    }
+    if (!a.fassung916) zeigeFassung = "haupt";
+    const hoch = zeigeFassung === "916";
+    const v = hoch ? a.fassung916.version : a.ergebnis.version;
+    const umschalter = a.fassung916
+      ? el("div", { class: "reihe fassungen", role: "group", "aria-label": "Fassung" },
+        ...[["haupt", istVideo ? "Hauptfassung" : "Beitrag"], ["916", istVideo ? "9:16 für Instagram/TikTok" : "Story 9:16"]].map(([wert, text]) =>
+          el("button", { type: "button", class: `klein ${zeigeFassung === wert ? "" : "zweit"}`, "aria-pressed": String(zeigeFassung === wert), onclick: () => { zeigeFassung = wert; zeigeErgebnis(); } }, text)))
+      : null;
     if (istVideo) {
-      const { breite, hoehe } = a.ergebnis.masse;
-      ersetzen(vorschau, el("video", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}`, controls: true, playsinline: true, preload: "metadata", style: { aspectRatio: `${breite} / ${hoehe}`, width: breite > hoehe ? "100%" : "auto", height: breite > hoehe ? "auto" : "70vh" } }));
-      const lageText = a.lageAutomatisch && a.lage && a.lage !== "unten" ? ` · Untertitel ${a.lage === "oben" ? "oben" : "in der Mitte"} (unten wäre das Gesicht verdeckt)` : "";
+      const { breite, hoehe } = hoch ? { breite: 1080, hoehe: 1920 } : a.ergebnis.masse;
+      ersetzen(vorschau, el("video", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}${hoch ? "&fassung=916" : ""}`, controls: true, playsinline: true, preload: "metadata", style: { aspectRatio: `${breite} / ${hoehe}`, width: breite > hoehe ? "100%" : "auto", height: breite > hoehe ? "auto" : "70vh" } }));
+      const lageText = !a.lageAutomatisch || !a.lage || a.lage === "unten" ? ""
+        : a.lage === "unter-bild" ? " · Untertitel unter dem Bild, Logo darüber"
+          : ` · Untertitel ${a.lage === "oben" ? "oben" : "in der Mitte"} (unten wäre das Gesicht verdeckt)`;
       vorschauInfo.textContent = `Fertiges Video (Vorschau in kleiner Auflösung) · ${a.ergebnis.masse.breite}×${a.ergebnis.masse.hoehe}${lageText}`;
     } else {
-      ersetzen(vorschau, el("img", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}`, alt: "Fertiges Sharepic" }));
+      ersetzen(vorschau, el("img", { src: `/api/auftrag/${id}/vorschaudatei?v=${v}${hoch ? "&fassung=916" : ""}`, alt: "Fertiges Sharepic" }));
       vorschauInfo.textContent = "";
     }
+    ersetzen(fassungWahl, umschalter);
   }
 
   /** Solange der Server arbeitet: Stand abfragen. */
@@ -1225,6 +1272,7 @@ async function editor(id) {
 
   function aufbauen() {
     e = structuredClone(a.e);
+    beiAenderung.length = 0;
     logoBereich = logoBereichBauen();
     const kopf = istVideo
       ? [el("h1", {}, "🎬 Gestaltung"), a.quelle ? el("p", { class: "leise" }, `${a.clips.length === 1 ? "1 Clip" : `${a.clips.length} Clips`}, erster ${a.quelle.breite}×${a.quelle.hoehe}${a.quelle.hatTon ? "" : ", ohne Ton"}`) : null]
@@ -1233,10 +1281,12 @@ async function editor(id) {
     if (!istVideo) {
       teile.push(...textfeld("claim", "Claim", { mehrzeilig: true, max: 300 }), ...textfeld("text", "Erklärtext (optional)", { mehrzeilig: true, max: 800 }));
       teile.push(...auswahl("sharepicFormat", optionen.sharepicFormate.map((f) => [f, optionen.formate.find((x) => x.id === f).titel]), "Format"));
+      teile.push(...fassungBereich());
       teile.push(...designWahl(), ...logoBereich.block, ...fotoBereich());
     } else {
       teile.push(...auswahl("format", optionen.formate.map((f) => [f.id, f.titel]), "Format"));
       teile.push(...auswahl("anpassen", [["rand", "mit unscharfem Rand auffüllen"], ["zuschneiden", "zuschneiden"]], "Passt nicht genau?"));
+      teile.push(...fassungBereich());
       teile.push(...designWahl(), ...logoBereich.block);
       teile.push(untertitelBereich(), tonBereich(), bauchbindeBereich(),
         el("details", { open: Boolean(e.titelkarte || e.abspannAn) }, el("summary", {}, "Titelkarte und Abspann"), karteBereich("titelkarte"), karteBereich("abspann")));

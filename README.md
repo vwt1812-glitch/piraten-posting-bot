@@ -35,7 +35,7 @@ Danach kommt die Vorschau und darunter das Menü:
 |---|---|
 | ✅ Jetzt posten · 🕐 Planen | nur mit Postiz: fragt nach und postet; Planen mit Vorschlägen, nächstem freien Postiz-Slot oder Eingabe wie `Fr 18 Uhr`, `24.10. 19:30`, `in 2 Stunden` |
 | 📥 Fertige Datei | die Datei in voller Qualität – auch ganz ohne Postiz |
-| 🎨 Gestaltung | Design, Logo, Format, Untertitel (an/aus, Lage, Fläche oder Kontur, Korrekturen), Bauchbinde, Titelkarte, Abspann; bei Sharepics Claim, Erklärtext und Foto-Stil. „Übernehmen“ baut neu |
+| 🎨 Gestaltung | Design, Logo, Format, 9:16-Fassung, Untertitel (an/aus, Lage, Fläche oder Kontur, bearbeiten als Liste), Bauchbinde, Titelkarte, Abspann; bei Sharepics Claim, Erklärtext und Foto-Stil. „Übernehmen“ baut neu |
 | ✏️ Text ändern · 🔄 Neu formulieren | Beitragstext; neu formulieren nur mit KI-Schlüssel (Claude oder OpenAI) |
 | 📺 Kanäle · 👤 Kunde | nur mit Postiz: Kanäle an-/abwählen, Postiz-Kunden (z. B. eine Gliederung) wählen |
 | 🗑️ Verwerfen | |
@@ -43,8 +43,11 @@ Danach kommt die Vorschau und darunter das Menü:
 Für **Titelkarte und Abspann** kann man statt Text auch ein eigenes Bild schicken – zum Beispiel ein Sharepic, das
 man vorher in der ppicng-Web-App gebaut hat (`PPICNG_URL` setzen, dann verlinkt der Bot sie).
 
-Untertitel-Korrekturen: unter 📝 Untertitel → ✏️ Korrigieren Zeilen wie `Pieraten => PIRATEN` schicken oder die
-korrigierte `.srt`-Datei. Wiederkehrende Begriffe gehören ins `glossar.txt`.
+Untertitel bearbeiten: unter 📝 Untertitel → ✏️ Untertitel bearbeiten schickt der Bot alle Untertitel als
+nummerierte Liste. Kopieren, Fehler ändern, zurückschicken – die Nummer bleibt vorne, die Zeiten bleiben gleich.
+Es reichen auch nur die geänderten Zeilen (`4 Ob das klappt?`), `4 -` löscht Untertitel 4, `Pieraten => PIRATEN`
+ersetzt überall; alternativ die korrigierte `.srt`-Datei schicken. Wiederkehrende Begriffe gehören ins
+`glossar.txt`. (Wie im Stadtrat-Social-Bot.)
 
 Ist ein Text für einen Kanal zu lang (X 280, Bluesky 300, Mastodon 500 …), lässt der Bot nicht posten und bietet
 „✂️ Automatisch kürzen“ an. 15 Minuten nach jedem Termin schaut er in Postiz nach und meldet sich, wenn etwas hängt
@@ -164,6 +167,19 @@ automatisch“, im Menü bzw. in der Web-Version überschreibbar). Weil das Vide
 um. Füllt das Gesicht fast das ganze Bild oder reicht der Kopf ins Logo, gibt es einen 💡-Tipp für die nächste
 Aufnahme. `pi/install.sh` richtet Python mit OpenCV in `.venv` ein; fehlt es, bleibt die Suche einfach aus.
 Übernommen aus dem [Stadtrat-Social-Bot](https://github.com/vwt1812-glitch/stadtrat-social-bot).
+
+## Querformat → 9:16 für Instagram, TikTok und Story
+
+Querformat-Videos laufen auf X, Mastodon, Bluesky oder Facebook gut, auf Instagram und TikTok braucht es Hochformat.
+Mit **📲 9:16 für Insta** (im Bot unter 🎨 Gestaltung, im Browser unter „Fassungen“) baut der Bot zusätzlich eine
+9:16-Fassung: das Video in voller Breite, darüber und darunter eine unscharfe Kopie. In diesem Rand sitzt das Logo
+über dem Bild, die Untertitel stehen darunter („📍 Lage: direkt unter dem Bild“) und die Bauchbinde bleibt im Bild – so
+verdeckt nichts das Gesicht. Beim Posten über Postiz bekommen nur die Hochformat-Netzwerke (`HOCHKANT_NETZE`,
+Standard Instagram und TikTok) die 9:16-Fassung, alle anderen das Original.
+
+**📱 Story** postet zusätzlich eine Instagram-Story – mit der 9:16-Fassung, bei Sharepics in 9:16 neu gesetzt. Beide
+Fassungen gibt es auch als Download. Übernommen aus dem
+[Stadtrat-Social-Bot](https://github.com/vwt1812-glitch/stadtrat-social-bot).
 
 ## Telegram und Matrix
 

@@ -11,7 +11,7 @@ import { MatrixPlattform } from "./plattform/matrix.mjs";
 import { ladePpicng, sucheLogos } from "./ppicng.mjs";
 import { schriftenAnmelden } from "./grafik.mjs";
 import { ausfuehren, fotoNormalisieren, sichereEndung } from "./video.mjs";
-import { parseKorrekturen, parseBauchbinde } from "./untertitel.mjs";
+import { parseBauchbinde } from "./untertitel.mjs";
 import { kuerzen } from "./caption.mjs";
 import { kundenAus, zeichenLimit, zeichenZahl } from "./postiz.mjs";
 import { erwartetePosts, faelligeKontrollen, abfragezeitraum, auswerten } from "./kontrolle.mjs";
@@ -49,6 +49,7 @@ async function kontext(a) {
     ki: Boolean(config.caption.anbieter),
     whisper: Boolean(config.whisper),
     gesicht: werkstatt.gesichtAktiv,
+    istHochkant: a.art === "video" && werkstatt.clips(a).length ? werkstatt.istHochkant(a) : true,
     ppicngUrl: config.ppicng.url,
     webUrl: config.web?.url,
     standardLogo: std.logo,
@@ -185,6 +186,12 @@ async function zeigen(a) {
   }
   if (a.art === "video") await p.video(a.chat, a.vorschauDatei, { ...a.masse, dauer: a.dauer });
   else await p.bild(a.chat, a.vorschauDatei);
+  if (a.hochkantVorschau) {
+    const wofuer = [a.art === "video" && a.e.hochkant && "Instagram/TikTok", a.e.story && "Story"].filter(Boolean).join(" und ");
+    const text = `9:16-Fassung${wofuer ? ` für ${wofuer}` : ""}`;
+    if (a.art === "video") await p.video(a.chat, a.hochkantVorschau, { breite: 1080, hoehe: 1920, dauer: a.dauer, text });
+    else await p.bild(a.chat, a.hochkantVorschau, { text });
+  }
   await hauptmenu(a, { neu: true });
 }
 
@@ -313,9 +320,41 @@ async function knopf(ereignis) {
       auftraege.aendern(a.id, { e, geaendert: true });
       return menuZeigen(a, M.untertitelMenu(a, ctx));
     case "srt":
-      return p.dokument(a.chat, werkstatt.srtFuerAusgabe(a), { text: "Korrigiert zurückschicken – oder Korrekturen als <code>falsch => richtig</code>." });
-    case "korrektur":
-      return warte("korrektur", "✏️ Schick mir Korrekturen, eine pro Zeile: <code>falsch => richtig</code> – oder eine <code>.srt</code>-Datei.");
+      auftraege.aendern(a.id, { wartetAuf: "korrektur" });
+      return p.dokument(a.chat, werkstatt.srtFuerAusgabe(a), { text: "Bearbeitet zurückschicken – ich baue sie dann ein." });
+    case "korrektur": {
+      // Wie im Stadtrat-Bot: nummerierte Liste kopieren, ändern, zurückschicken
+      const liste = werkstatt.untertitelListe(a);
+      if (!liste.length) return warte("korrektur", "Es gibt noch keine Untertitel. Schick mir eine <code>.srt</code>-Datei, dann baue ich sie ein.");
+      await warte("korrektur", [
+        "<b>✏️ Untertitel bearbeiten</b>",
+        "Die Liste unten kopieren (lange drücken → Kopieren), Fehler ändern und zurückschicken. Die Nummer bleibt vorne – so wird genau dieser Untertitel geändert, die Zeit bleibt gleich.",
+        "• Es reichen auch nur die geänderten Zeilen, z. B. <code>4 Ob das klappt?</code>",
+        "• <code>4 -</code> löscht Untertitel 4",
+        "• <code>Kuffner => Küffner</code> (ohne Nummer) ersetzt überall",
+        "• oder eine <code>.srt</code>-Datei schicken",
+        "<code>abbrechen</code> beendet das Bearbeiten. Zeiten ändern und mehr: im Browser.",
+      ].join("\n"), [[{ text: "📄 Als SRT-Datei", daten: `${a.id}:srt` }], [{ text: "⬅️ Zurück", daten: `${a.id}:untertitel` }]]);
+      for (const teil of liste) await p.senden(a.chat, html(teil));
+      return;
+    }
+
+    case "hk":
+      Object.assign(e, { hochkant: !e.hochkant });
+      auftraege.aendern(a.id, { e, geaendert: true });
+      return menuZeigen(a, M.gestaltungMenu(a, ctx));
+    case "st": {
+      // Story: Ist schon eine passende 9:16-Fassung da (oder das Video selbst 9:16), geht es ohne Neubau
+      Object.assign(e, { story: !e.story });
+      const neuBauenNoetig = werkstatt.brauchtZweitfassung(a) && !a.hochkantDatei;
+      auftraege.aendern(a.id, { e });
+      if (neuBauenNoetig) {
+        await menuZeigen(a, { text: "📱 Baue die 9:16-Fassung für die Story …", knoepfe: [] });
+        auftraege.aendern(a.id, { menu: null });
+        return neuBauen(a);
+      }
+      return hauptmenu(a);
+    }
 
     case "ton":
       return menuZeigen(a, M.tonMenu(a));
@@ -448,6 +487,11 @@ async function dateiSchicken(a) {
   const name = path.join(a.ordner, `piraten-${a.art}-${a.id}${endung}`);
   await fsp.copyFile(a.ergebnis, name);
   await p.dokument(a.chat, name, { text: "📥 In voller Qualität" });
+  if (a.hochkantDatei && fs.existsSync(a.hochkantDatei) && fs.statSync(a.hochkantDatei).size <= p.maxUpload) {
+    const hoch = path.join(a.ordner, `piraten-${a.art}-${a.id}-9x16${path.extname(a.hochkantDatei)}`);
+    await fsp.copyFile(a.hochkantDatei, hoch);
+    await p.dokument(a.chat, hoch, { text: "📥 9:16-Fassung (Instagram/TikTok, Story)" });
+  }
 }
 
 // ---------- Texteingaben ----------
@@ -522,10 +566,18 @@ async function eingabe(a, ereignis) {
     case "erklaertext":
       return gestaltet({ text: text.trim() });
     case "korrektur": {
-      const korrekturen = parseKorrekturen(text);
-      if (!korrekturen.length) return p.senden(a.chat, "Bitte als <code>falsch => richtig</code> schicken, eine pro Zeile.");
-      werkstatt.korrigieren(a, korrekturen);
-      await p.senden(a.chat, `✏️ ${korrekturen.length} Korrektur(en) übernommen.`);
+      const b = werkstatt.listeBearbeiten(a, text);
+      if (!b.erkannt) {
+        return p.senden(a.chat, "Bitte die Liste mit den Nummern vorne zurückschicken (z. B. <code>4 Ob das klappt?</code>) oder <code>falsch => richtig</code>. <code>abbrechen</code> beendet das Bearbeiten.");
+      }
+      const teile = [
+        b.geaendert && `${b.geaendert} Untertitel geändert`,
+        b.geloescht && `${b.geloescht} gelöscht`,
+        b.ersetzt && `${b.ersetzt} Ersetzung(en) übernommen`,
+      ].filter(Boolean);
+      const warnung = b.unbekannt.length ? ` Nummer ${b.unbekannt.join(", ")} gibt es nicht.` : "";
+      if (!teile.length) return p.senden(a.chat, `Ich habe keine Änderung gefunden.${warnung} Schick die geänderten Zeilen oder <code>abbrechen</code>.`);
+      await p.senden(a.chat, `✏️ ${teile.join(", ")}.${warnung}`);
       return gestaltet({ untertitel: true });
     }
     case "zeit": {

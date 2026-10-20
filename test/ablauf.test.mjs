@@ -63,8 +63,12 @@ const server = http.createServer(async (req, res) => {
     }
     neu("telegram", methode, daten);
     if (methode === "getMe") return json(res, { ok: true, result: { username: "testbot" } });
-    if (methode === "getFile") return json(res, { ok: true, result: { file_path: "videos/quelle.mp4" } });
+    if (methode === "getFile") return json(res, { ok: true, result: { file_path: daten.file_id === "SRT" ? "dokumente/u.srt" : "videos/quelle.mp4" } });
     return json(res, { ok: true, result: { message_id: anrufe.length } });
+  }
+  if (url.pathname === `/file/bot${TOKEN}/dokumente/u.srt`) {
+    res.writeHead(200);
+    return res.end("1\n00:00:00,000 --> 00:00:01,500\nHallo zusammen\n\n2\n00:00:01,500 --> 00:00:02,000\nzweiter Satz\n");
   }
   if (url.pathname === `/file/bot${TOKEN}/videos/quelle.mp4`) {
     res.writeHead(200);
@@ -81,7 +85,10 @@ const server = http.createServer(async (req, res) => {
         { id: "kanal-x", name: "X KV", identifier: "x", disabled: false, customer: { id: "kunde1", name: "KV Test" } },
       ]);
     }
-    if (pfad === "/upload") return json(res, { id: "medium1", path: "https://postiz/medium1.mp4" });
+    if (pfad === "/upload") {
+      const n = anrufe.filter((a) => a.methode === "POST /upload").length;
+      return json(res, { id: `medium${n}`, path: `https://postiz/medium${n}.mp4` });
+    }
     if (pfad === "/posts" && req.method === "POST") return json(res, [{ postId: "post1", integration: "kanal-ig" }]);
     if (pfad.startsWith("/posts")) return json(res, { posts: [] });
     return json(res, {}, 404);
@@ -207,8 +214,13 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   const designMenu = await warteAuf(() => ab(i, "telegram", "editMessageText"), "Designmenü");
   assert.match(JSON.stringify(designMenu.daten.reply_markup), /Lila · Weiß · Orange/);
   tgKnopf(`${id}:d:lila-weiss-orange`);
+  // Querformat behalten und zusätzlich die 9:16-Fassung für Instagram/TikTok (aus dem Stadtrat-Bot)
+  tgKnopf(`${id}:f:original`);
+  tgKnopf(`${id}:hk`);
   tgKnopf(`${id}:fertig`);
   await warteAuf(() => ab(i, "telegram", "sendVideo"), "neu gebautes Video");
+  const hochVorschau = await warteAuf(() => anrufe.slice(i).find((a) => a.methode === "sendVideo" && /9:16-Fassung für Instagram\/TikTok/.test(a.daten.caption ?? "")), "9:16-Vorschau");
+  assert.equal(hochVorschau.daten.height, "1920");
   await warteAuf(() => anrufe.slice(i).find((a) => a.methode === "sendMessage" && /Lila/.test(a.daten.text ?? "")), "Menü nach Neubau");
 
   i = anrufe.length;
@@ -219,7 +231,11 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   const post = await warteAuf(() => ab(i, "postiz", "POST /posts"), "Postiz-Beitrag");
   assert.equal(post.daten.type, "now");
   assert.deepEqual(post.daten.posts.map((p) => p.integration.id), ["kanal-ig", "kanal-x"]);
-  assert.equal(post.daten.posts[0].value[0].image[0].id, "medium1");
+  // Instagram bekommt die 9:16-Fassung (zweiter Upload), X das Querformat
+  const bild = (kanal) => post.daten.posts.find((p) => p.integration.id === kanal).value[0].image[0].id;
+  assert.equal(bild("kanal-x"), "medium1");
+  assert.equal(bild("kanal-ig"), "medium2");
+  assert.equal(anrufe.slice(i).filter((a) => a.methode === "POST /upload").length, 2);
   assert.ok(ab(i, "postiz", "POST /upload"));
   await warteAuf(() => anrufe.slice(i).find((a) => a.dienst === "telegram" && /Gepostet auf/.test(a.daten.text ?? "")), "Bestätigung");
 
@@ -234,6 +250,21 @@ test("Ablauf über Telegram und Matrix", { skip: !ffmpeg && "ffmpeg fehlt", time
   tgNachricht({ document: { file_id: "F2", file_name: "quelle.mp4", mime_type: "video/mp4", file_size: 1000 } });
   const menu2 = await warteAuf(() => anrufe.slice(i).find((a) => a.methode === "sendMessage" && a.daten.reply_markup), "Hauptmenü zweites Video");
   const [, id2, schluessel] = menu2.daten.reply_markup.inline_keyboard.flat().find((k) => k.url).url.match(/uebernehmen\/(\w+)\/(\w+)$/);
+
+  // Untertitel im Chat: SRT schicken, dann als nummerierte Liste bearbeiten (aus dem Stadtrat-Bot)
+  i = anrufe.length;
+  tgKnopf(`${id2}:korrektur`);
+  assert.match((await warteAuf(() => ab(i, "telegram", /sendMessage|editMessageText/), "Hinweis ohne Untertitel")).daten.text, /noch keine Untertitel/);
+  i = anrufe.length;
+  tgNachricht({ document: { file_id: "SRT", file_name: "u.srt", mime_type: "application/x-subrip", file_size: 90 } });
+  await warteAuf(() => anrufe.slice(i).find((a) => /Gestaltung/.test(a.daten.text ?? "")), "SRT übernommen");
+  i = anrufe.length;
+  tgKnopf(`${id2}:korrektur`);
+  const liste = await warteAuf(() => anrufe.slice(i).find((a) => a.methode === "sendMessage" && /^1 Hallo zusammen\n2 zweiter Satz$/.test(a.daten.text ?? "")), "nummerierte Liste");
+  assert.ok(liste);
+  i = anrufe.length;
+  tgNachricht({ text: "2 Zweiter Satz." });
+  assert.match((await warteAuf(() => anrufe.slice(i).find((a) => /Untertitel geändert/.test(a.daten.text ?? "")), "Änderung übernommen")).daten.text, /1 Untertitel geändert/);
   const login = await fetch(`${webBasis}/api/anmelden`, { method: "POST", headers: { "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ passwort: "segel-setzen-ahoi", nutzer: "Anja" }) });
   const cookie = login.headers.get("set-cookie").split(";")[0];
   const ueber = (s) => fetch(`${webBasis}/api/uebernehmen`, { method: "POST", headers: { Cookie: cookie, "X-PPB": "1", "Content-Type": "application/json" }, body: JSON.stringify({ id: id2, schluessel: s }) });

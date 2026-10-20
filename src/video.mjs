@@ -198,6 +198,35 @@ export function schnittFilter(teile, masse, anpassen, { mitTon = true } = {}) {
 // ---------- Lage der Grafiken ----------
 
 /**
+ * Wo das Bild liegt, wenn ein breiteres Video mit unscharfem Rand in ein höheres Format gesetzt wird
+ * (z. B. 16:9 in 9:16) – so, wie flaecheFilter es setzt. null, wenn das Bild die Fläche füllt, zugeschnitten
+ * wird oder die Teile unterschiedliche Seitenverhältnisse haben (dann gibt es kein festes Bild).
+ * Übernommen aus vwt1812-glitch/stadtrat-social-bot (storyBild).
+ * @returns {{oben:number, unten:number}|null}
+ */
+export function bildBand(teile, masse, anpassen = "rand") {
+  if (anpassen === "zuschneiden" || !teile?.length) return null;
+  const verhaeltnis = teile[0].quelle.breite / teile[0].quelle.hoehe;
+  if (teile.some((t) => Math.abs(t.quelle.breite / t.quelle.hoehe - verhaeltnis) > 0.01)) return null;
+  if (verhaeltnis <= masse.breite / masse.hoehe + 0.01) return null;
+  const h = gerade(masse.breite / verhaeltnis);
+  const oben = Math.round((masse.hoehe - h) / 2);
+  return { oben, unten: oben + h };
+}
+
+/**
+ * Untertitel direkt unter dem Bild auf der unscharfen Fläche – dort verdecken sie nichts. Nur, wenn sie noch
+ * über Name und Caption von Reels/TikTok bleiben (die belegen hochkant die unteren 22 %); sonst null.
+ * @returns {number|null} Abstand vom unteren Rand als Anteil der Höhe
+ */
+export function positionUnterBild(band, masse) {
+  if (!band) return null;
+  const unterkante = band.unten + Math.round(masse.hoehe * 0.025) + 1.35 * untertitelGroesse(masse);
+  const position = (masse.hoehe - unterkante) / masse.hoehe;
+  return position >= 0.22 ? Math.round(position * 1000) / 1000 : null;
+}
+
+/**
  * Bauchbinde links unten – hochkant über Name und Caption von TikTok/Reels (die belegen die unteren
  * gut 20 %), und so, dass sie die Untertitel nicht verdeckt.
  */
@@ -254,6 +283,7 @@ export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, l
     return eingang_++;
   };
   let letzte = schnitt.video;
+  const band = bildBand(teile, masse, e.anpassen);
 
   if (ass) {
     filter.push(`[${letzte}]ass=${path.basename(ass)}:fontsdir=${fontsDir.replace(/[\\:']/g, "\\$&")}[sub]`);
@@ -263,7 +293,13 @@ export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, l
   if (logo) {
     const g = await logoPlakette({ logo, schema, logoBreite: Math.min(masse.breite, masse.hoehe) * e.logoBreite, stil: e.logoStil });
     const i = await bild("logo.png", g.png);
-    const { x, y } = logoLage({ masse, grafik: g, position: e.logoPosition });
+    let { x, y } = logoLage({ masse, grafik: g, position: e.logoPosition });
+    // Querformat auf 9:16: Logo mittig über dem Bild, wenn darüber Platz ist (unter der Kopfzeile der Apps)
+    const ueberBild = band ? band.oben - Math.round(Math.min(masse.breite, masse.hoehe) * 0.045) - g.hoehe : -1;
+    if (band && String(e.logoPosition).includes("oben") && ueberBild >= raender(masse).oben) {
+      x = Math.round((masse.breite - g.breite) / 2);
+      y = ueberBild;
+    }
     filter.push(`[${letzte}][${i}:v]overlay=${x}:${y}:format=auto[mitlogo]`);
     letzte = "mitlogo";
   }
@@ -275,7 +311,12 @@ export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, l
     const d = 0.35; // Ein- und Ausblenden
     const ende = Math.max(start + d, Math.min(start + zeiten.bauchbindeDauer, dauer - d - 0.05));
     const i = await bild("bauchbinde.png", g.png, Math.max(dauer, 1));
-    const { x, y } = bauchbindeLage({ masse, grafik: g, untertitel: Boolean(ass), lage: e.untertitelLage });
+    let { x, y } = bauchbindeLage({ masse, grafik: g, untertitel: Boolean(ass), lage: e.untertitelLage });
+    // Querformat auf 9:16: unten links im Bild, beim Sprecher – die Untertitel stehen darunter
+    if (band && band.unten - band.oben >= 3 * g.hoehe) {
+      x = raender(masse).rand;
+      y = Math.round(band.unten - kurz * 0.026 - g.hoehe);
+    }
     const weg = Math.round(kurz * 0.06); // so weit gleitet sie herein
     filter.push(`[${i}:v]format=rgba,fade=t=in:st=${start}:d=${d}:alpha=1,fade=t=out:st=${ende}:d=${d}:alpha=1[binde]`);
     filter.push(`[${letzte}][binde]overlay=x='${x}-${weg}*pow(max(0,1-(t-${start})/${d}),2)':y=${y}:enable='between(t,${start},${ende + d})':eof_action=pass:format=auto[mitbinde]`);
