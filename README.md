@@ -100,6 +100,18 @@ Logo und Bauchbinde in **einem** ffmpeg-Durchgang, damit der Pi nur einmal encod
 
 ### Ton
 
+- **Eigene Tonspur:** Unter dem Bild liegt der Ton als eigene Ebene mit Wellenform. Zuerst hängt er am Bild (jeder
+  Teil bringt seinen Ton mit). Mit **🔓 Ton vom Bild lösen** – oder einfach durch Ziehen eines Tonabschnitts – wird er
+  eigenständig: Abschnitte verschieben (J- und L-Schnitte, Ton läuft über den Schnitt hinaus), an den Rändern kürzen,
+  mit Alt den Inhalt im Abschnitt verschieben, mit **S** teilen, mit **Entf** entfernen, je Abschnitt Lautstärke
+  (bis 200 %), stumm, Ein- und Ausblenden. Abschnitte rasten an Schnitten, Abspielposition und anderen Abschnitten ein,
+  überlappende werden gemischt. Der Player spielt die Tonspur genau so, wie sie im fertigen Video klingt; die
+  Untertitel folgen dem hörbaren Ton. **🔗 Wieder ans Bild koppeln** verwirft die eigene Tonspur.
+- **Tonaufnahme dazu** (z. B. Ansteckmikrofon, Zoom-Rekorder): Der Bot vergleicht die Lautstärkekurven mit dem Ton
+  der Kamera, findet die passende Stelle (auf 10 ms genau) und ersetzt den Kamera-Ton an jedem Schnitt durch die
+  Aufnahme – der Kamera-Ton bleibt stumm in der Spur, falls man ihn doch braucht. Die Untertitel kommen weiter aus
+  dem Kamera-Clip. Findet er keine passende Stelle, liegt die Aufnahme ab 0:00 und lässt sich von Hand schieben
+  (🎯 sucht erneut). Ohne Bezug zu einem Clip bekommt die Aufnahme eine eigene Spracherkennung.
 - **Hintergrundmusik:** Audiodatei hochladen (MP3, M4A, OGG, WAV, FLAC). Sie läuft in Schleife unter dem Video,
   blendet am Anfang ein und am Ende aus, Lautstärke und Startpunkt im Stück sind einstellbar. Mit **„Leiser, wenn
   gesprochen wird“** (Ducking) geht sie automatisch zurück, sobald jemand redet. Im Player hört man sie zur
@@ -292,7 +304,8 @@ Modell. Danach dem Bot `/status` (Matrix: `!status`) schicken: zeigt ffmpeg, ppi
 - **Logo** oben links (`LOGO_POSITION`), standardmäßig ohne Fläche (`LOGO_STIL=auto`): Der Bot misst, wie hell
   das Bild hinter dem Logo ist, und nimmt auf hellem Grund (weiße Wand) das dunkle Logo mit hellem Schein, sonst
   das helle mit Schatten. `plakette` setzt es auf eine kleine, abgerundete Fläche im Design mit der farbigen Linie
-  darunter (wie unter dem Claim in ppicng), `frei` immer hell mit Schatten. Umschaltbar im Bot unter 🏴‍☠️ Logo →
+  darunter (wie unter dem Claim in ppicng), `glas` auf dunkles Milchglas (der Hintergrund dahinter wird
+  weichgezeichnet und abgedunkelt) mit hellem Logo, `frei` immer hell mit Schatten. Umschaltbar im Bot unter 🏴‍☠️ Logo →
   ✨ Stil und im Browser. Hochkant beginnt das Logo bei 14 % der Höhe, frei von den Reitern von Reels und TikTok.
 - **Untertitel** in DejaRip Bold auf einer Fläche im Design (`UNTERTITEL_STIL=box`) oder weiß mit Kontur (`rand`),
   einzeilig in kurzen Häppchen; hochkant über Name und Caption der Apps, pro Video unten/Mitte/oben.

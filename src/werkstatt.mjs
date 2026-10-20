@@ -9,10 +9,10 @@ import { chatStandard } from "./config.mjs";
 import { Auftraege } from "./auftraege.mjs";
 import { logoNachId, farbschema } from "./ppicng.mjs";
 import { sharepic, fotoMitLogo, eigenesBild } from "./grafik.mjs";
-import { bildBand, positionUnterBild, tonUntersuchen, untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie } from "./video.mjs";
+import { bildBand, positionUnterBild, tonUntersuchen, untersuche, tonFuerWhisper, rendern, renderArgs, vorschau, zielMasse, FORMATE, fotoFuerKi, ausfuehren, arbeitskopie, tonArbeitskopie, huellkurve } from "./video.mjs";
 import { transkribiere } from "./whisper.mjs";
 import { parseSrt, formatSrt, zuAss, volltext, wendeKorrekturenAn, alsListe, wendeBearbeitungAn } from "./untertitel.mjs";
-import { ganzerClip, schnittCues, cuesZurueck, schnittDauer, imClip } from "./schnitt.mjs";
+import { ganzerClip, schnittCues, cuesZurueck, schnittDauer, imClip, tonAusSchnitt, tonspurPruefen, tonCues, cuesZurueckTon, versatzFinden } from "./schnitt.mjs";
 import { captionVorschlag } from "./caption.mjs";
 import { gesichtSuchen, lageFuer } from "./gesicht.mjs";
 import { Postiz, STORY, AnfragenZaehler, passendeKanaele, passtZu, findeKunde, kanaeleVonKunde, zeichenLimit, zeichenZahl } from "./postiz.mjs";
@@ -139,12 +139,122 @@ export class Werkstatt {
     if (!clips.length) throw new Error("Der letzte Clip bleibt – sonst den ganzen Beitrag verwerfen.");
     const schnitt = this.schnitt(a).filter((t) => t.clip !== id);
     this.#clipsSpeichern(a, clips, schnitt.length ? schnitt : clips.map(ganzerClip));
+    if (a.tonspur) this.aendern(a, { tonspur: a.tonspur.filter((s) => s.quelle !== id) });
+    // Synchron zu diesem Clip war, wer ihn als Bezug hatte
+    if (a.tonclips?.length) this.aendern(a, { tonclips: a.tonclips.map((t) => ({ ...t, sync: (t.sync ?? []).filter((x) => x.clip !== id) })) });
     this.cuesSchreiben(a, this.cues(a).filter((c) => c.clip !== id));
   }
 
   schnittSetzen(a, schnitt) {
     this.#clipsSpeichern(a, this.clips(a), schnitt);
     this.aendern(a, { transkript: volltext(this.ausgabeCues(a)), geaendert: true });
+  }
+
+  // ---------- Tonspur und Tonaufnahmen ----------
+  // a.tonspur: null (Ton am Bild) oder Abschnitte – siehe schnitt.mjs.
+  // a.tonclips: [{id: "t1", name, datei, dauer, arbeitskopie: {ton, welle}, sync: [{clip, versatz, guete}], transkribiert}]
+
+  tonclips(a) {
+    return a.tonclips ?? [];
+  }
+
+  /** Alles, was Ton liefern kann: Clips mit Ton und Tonaufnahmen. */
+  tonquellen(a) {
+    return [
+      ...this.clips(a).filter((c) => c.hatTon).map((c) => ({ id: c.id, dauer: c.dauer, datei: c.datei, art: "video", hatTon: true })),
+      ...this.tonclips(a).map((t) => ({ id: t.id, dauer: t.dauer, datei: t.datei, art: "ton", hatTon: true })),
+    ];
+  }
+
+  tonspur(a) {
+    return a.tonspur ?? null;
+  }
+
+  /** Tonspur setzen (null = Ton wieder ans Bild koppeln). */
+  tonspurSetzen(a, spur) {
+    const geprueft = tonspurPruefen(spur, this.tonquellen(a), schnittDauer(this.schnitt(a)));
+    this.aendern(a, { tonspur: geprueft, geaendert: true });
+    this.aendern(a, { transkript: volltext(this.ausgabeCues(a)), hatUntertitel: this.ausgabeCues(a).length > 0 });
+  }
+
+  /**
+   * Tonaufnahme (z. B. vom Ansteckmikrofon) dazunehmen. Ist sie zu Clips synchron, ersetzt sie gleich deren
+   * Ton genau an den Schnitten (der Kamera-Ton bleibt stumm in der Spur, falls man ihn doch braucht);
+   * sonst liegt sie ab Sekunde 0 unter dem Video. Gehört in die Warteschlange.
+   * @returns {Promise<{tonclip:object, synchron:string[]}>}
+   */
+  async tonclipHinzufuegen(a, datei, name = path.basename(datei)) {
+    const { dauer } = await tonUntersuchen(datei);
+    if (!(dauer > 0.2)) throw new Error("Die Tonaufnahme ist zu kurz oder lässt sich nicht lesen.");
+    const liste = this.tonclips(a);
+    if (liste.length >= 10) throw new Error("Höchstens 10 Tonaufnahmen je Video.");
+    const id = `t${liste.reduce((n, t) => Math.max(n, Number(t.id.slice(1)) || 0), 0) + 1}`;
+    const ordner = path.join(a.ordner, "clips", id);
+    await fsp.mkdir(ordner, { recursive: true });
+    const tonclip = { id, name: String(name).slice(0, 80), datei, dauer, arbeitskopie: await tonArbeitskopie(datei, ordner), sync: await this.#synchronFinden(a, datei) };
+    this.aendern(a, { tonclips: [...liste, tonclip] });
+    this.aendern(a, { tonspur: this.#einsetzen(a, this.tonspur(a) ?? tonAusSchnitt(this.schnitt(a)), tonclip), geaendert: true });
+    this.aendern(a, { transkript: volltext(this.ausgabeCues(a)), hatUntertitel: this.ausgabeCues(a).length > 0 });
+    return { tonclip, synchron: tonclip.sync.map((x) => this.clip(a, x.clip).name) };
+  }
+
+  tonclipEntfernen(a, id) {
+    const t = this.tonclips(a).find((x) => x.id === id);
+    if (!t) throw new Error("Diese Tonaufnahme gibt es nicht.");
+    this.aendern(a, { tonclips: this.tonclips(a).filter((x) => x.id !== id), geaendert: true });
+    if (a.tonspur) {
+      // Kamera-Ton, den die Aufnahme ersetzt hatte, wieder hörbar machen
+      const synchron = new Set((t.sync ?? []).map((x) => x.clip));
+      this.aendern(a, { tonspur: a.tonspur.filter((s) => s.quelle !== id).map((s) => (synchron.has(s.quelle) && s.stumm ? (({ stumm, ...rest }) => rest)(s) : s)) });
+    }
+    this.cuesSchreiben(a, this.cues(a).filter((c) => c.clip !== id));
+    fsp.rm(path.join(a.ordner, "clips", id), { recursive: true, force: true }).catch(() => {});
+    fsp.rm(t.datei, { force: true }).catch(() => {});
+  }
+
+  /** Erneut nach dem Versatz suchen und die Aufnahme an den Clips ausrichten. Gehört in die Warteschlange. */
+  async tonclipAusrichten(a, id) {
+    const t = this.tonclips(a).find((x) => x.id === id);
+    if (!t) throw new Error("Diese Tonaufnahme gibt es nicht.");
+    const sync = await this.#synchronFinden(a, t.datei);
+    const neu = { ...t, sync };
+    this.aendern(a, { tonclips: this.tonclips(a).map((x) => (x.id === id ? neu : x)) });
+    const ohne = (this.tonspur(a) ?? tonAusSchnitt(this.schnitt(a))).filter((s) => s.quelle !== id);
+    this.aendern(a, { tonspur: this.#einsetzen(a, ohne, neu), geaendert: true });
+    return sync.map((x) => this.clip(a, x.clip).name);
+  }
+
+  async #synchronFinden(a, datei) {
+    const lang = await huellkurve(datei, "ton");
+    const sync = [];
+    for (const clip of this.clips(a).filter((c) => c.hatTon)) {
+      const treffer = versatzFinden(await huellkurve(clip.datei, "video", 900), lang);
+      if (treffer) sync.push({ clip: clip.id, versatz: treffer.versatz, guete: treffer.guete });
+    }
+    return sync;
+  }
+
+  /** Tonaufnahme in die Spur legen: synchron statt des Kamera-Tons, sonst ab 0 dazu. */
+  #einsetzen(a, spur, tonclip) {
+    const versatz = new Map(tonclip.sync.map((x) => [x.clip, x.versatz]));
+    if (!versatz.size) {
+      const dauer = schnittDauer(this.schnitt(a));
+      return [...spur, { quelle: tonclip.id, von: 0, bis: Math.min(tonclip.dauer, dauer), ab: 0 }];
+    }
+    const neu = [];
+    for (const s of spur) {
+      const d = versatz.get(s.quelle);
+      const von = d === undefined ? -1 : s.von + d;
+      const bis = d === undefined ? -1 : Math.min(tonclip.dauer, s.bis + d);
+      if (von < 0 || bis - von < 0.1) {
+        neu.push(s);
+        continue;
+      }
+      neu.push({ ...s, stumm: true });
+      const { stumm, ...rest } = s;
+      neu.push({ ...rest, quelle: tonclip.id, von: Math.round(von * 1000) / 1000, bis: Math.round(bis * 1000) / 1000 });
+    }
+    return neu;
   }
 
   #clipAendern(a, id, felder) {
@@ -169,13 +279,14 @@ export class Werkstatt {
 
   cuesSchreiben(a, cues) {
     fs.writeFileSync(this.untertitelDatei(a), JSON.stringify(cues));
-    const aus = schnittCues(cues, this.schnitt(a));
+    const aus = this.ausgabeCues(a, cues);
     this.aendern(a, { hatUntertitel: aus.length > 0, transkript: volltext(aus) });
   }
 
-  /** Untertitel im fertigen Schnitt. */
-  ausgabeCues(a) {
-    return schnittCues(this.cues(a), this.schnitt(a));
+  /** Untertitel im fertigen Schnitt – bei gelöstem Ton folgen sie der Tonspur. */
+  ausgabeCues(a, cues = this.cues(a)) {
+    const spur = this.tonspur(a);
+    return spur ? tonCues(cues, spur, this.tonclips(a)) : schnittCues(cues, this.schnitt(a));
   }
 
   /** SRT des fertigen Schnitts (zum Herunterladen, für Plattformen mit eigenen Untertiteln). */
@@ -187,7 +298,8 @@ export class Werkstatt {
 
   /** Hochgeladene SRT (Zeiten im fertigen Schnitt) übernehmen. @returns Anzahl */
   srtUebernehmen(a, text) {
-    const cues = cuesZurueck(parseSrt(text), this.schnitt(a));
+    const spur = this.tonspur(a);
+    const cues = spur ? cuesZurueckTon(parseSrt(text), spur) : cuesZurueck(parseSrt(text), this.schnitt(a));
     // Untertitel der herausgeschnittenen Stellen bleiben, falls man den Schnitt wieder ändert
     const sichtbar = new Set(this.ausgabeCues(a).map((c) => c.index));
     const bleiben = this.cues(a).filter((_, i) => !sichtbar.has(i));
@@ -256,6 +368,18 @@ export class Werkstatt {
 
   async untertitelErkennen(a, schritt = () => {}) {
     for (const clip of this.clips(a)) await this.#untertitelFuerClip(a, clip, schritt);
+    // Tonaufnahmen, die zu keinem Clip synchron sind, brauchen eigene Untertitel – sofern sie benutzt werden
+    const benutzt = new Set((this.tonspur(a) ?? []).map((s) => s.quelle));
+    for (const t of this.tonclips(a)) {
+      if (t.sync?.length || !benutzt.has(t.id) || t.transkribiert || !this.config.whisper) continue;
+      await schritt(`🎙️ Spracherkennung (${t.name}) …`);
+      const wav = path.join(a.ordner, `ton-${t.id}.wav`);
+      await tonFuerWhisper(t.datei, wav, "ton");
+      const neu = await transkribiere(wav, this.config.whisper, this.config.glossar);
+      await fsp.rm(wav, { force: true });
+      this.cuesSchreiben(a, [...this.cues(a).filter((c) => c.clip !== t.id), ...neu.map((c) => ({ clip: t.id, ...c }))]);
+      this.aendern(a, { tonclips: this.tonclips(a).map((x) => (x.id === t.id ? { ...x, transkribiert: true } : x)) });
+    }
   }
 
   /** Gesichter suchen (einmal je Clip); die Lage wird beim Bauen fürs Zielformat bestimmt. */
@@ -409,7 +533,7 @@ export class Werkstatt {
       ? `🎬 Baue das Video (${Math.round(schnittDauer(this.schnitt(a)))} s) …`
       : "📲 Baue die 9:16-Fassung für Instagram/TikTok …");
     const fertig = await rendern({
-      teile: this.#teile(a), ausgabe, e: { ...e, untertitelLage: lage.lage }, schema, logo, ass,
+      teile: this.#teile(a), ausgabe, tonspur: this.tonspur(a), tonquellen: new Map(this.tonquellen(a).map((q) => [q.id, q])), e: { ...e, untertitelLage: lage.lage }, schema, logo, ass,
       fontsDir: path.dirname(this.ppicng.schriften.fett), zeiten: this.config.zeiten, video: this.config.video,
     });
     const klein = path.join(a.ordner, `vorschau${name === "fertig" ? "" : `-${name}`}.mp4`);

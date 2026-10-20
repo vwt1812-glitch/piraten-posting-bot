@@ -129,7 +129,7 @@ details > summary { cursor: pointer; font-family: "Politics Head"; text-transfor
 .werkzeuge .zeit { font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; font-size: .9rem; padding: 0 .4rem; }
 .zeitleiste { position: relative; user-select: none; touch-action: none; cursor: pointer; border-radius: 8px; background: var(--grund); padding: 4px 0; }
 .zeitleiste:focus-visible { outline: 3px solid var(--orange); }
-.spur-teile { display: flex; gap: 3px; height: 108px; }
+.spur-teile { display: flex; gap: 3px; height: 76px; }
 .teil { position: relative; overflow: hidden; min-width: 6px; background: #333; border-radius: 4px; border: 2px solid transparent; }
 .teil.gewaehlt { border-color: var(--orange); }
 .teil .streifen { position: absolute; top: 0; height: 72px; max-width: none; object-fit: fill; pointer-events: none; }
@@ -137,6 +137,27 @@ details > summary { cursor: pointer; font-family: "Politics Head"; text-transfor
 .teil .leise { position: absolute; inset: 0; display: grid; place-items: center; color: #ccc; font-size: .8rem; }
 .teil-name { position: absolute; left: 4px; top: 3px; font-size: .72rem; color: #fff; background: rgba(0,0,0,.6); padding: 0 .3rem; border-radius: 3px; max-width: calc(100% - 8px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .spur-ut { position: relative; height: 10px; margin-top: 4px; }
+/* Tonspur: eigene Ebene unter dem Bild; Abschnitte frei verschiebbar, wenn der Ton gelöst ist */
+.ton-kopf { display: flex; flex-wrap: wrap; gap: .3rem .6rem; align-items: center; margin: .5rem 0 .3rem; }
+.spur-ton { position: relative; margin-top: 4px; overflow: hidden; min-height: 38px; }
+.ton-abschnitt { position: absolute; height: 34px; box-sizing: border-box; overflow: hidden; background: #2b2b2b; border: 2px solid transparent; border-radius: 4px; cursor: grab; touch-action: none; }
+.ton-abschnitt:active { cursor: grabbing; }
+.ton-abschnitt.aufnahme { background: #1b2d38; }
+.ton-abschnitt.stumm { opacity: .4; }
+.ton-abschnitt.gewaehlt { border-color: var(--orange); z-index: 1; }
+.spur-ton.gekoppelt .ton-abschnitt { cursor: pointer; }
+.ton-abschnitt .welle { position: absolute; top: 0; height: 100%; max-width: none; object-fit: fill; pointer-events: none; opacity: .95; }
+.ton-abschnitt .leise { position: absolute; inset: 0; display: grid; place-items: center; color: #aaa; font-size: .7rem; }
+.ton-name { position: absolute; left: 6px; top: 2px; max-width: calc(100% - 14px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .7rem; color: #fff; background: rgba(0,0,0,.6); padding: 0 .3rem; border-radius: 3px; pointer-events: none; }
+.blende { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+.blende.ein { left: 0; background: linear-gradient(to top left, transparent 50%, rgba(0,0,0,.6) 50%); }
+.blende.aus { right: 0; background: linear-gradient(to top right, transparent 50%, rgba(0,0,0,.6) 50%); }
+.griff { position: absolute; top: 0; bottom: 0; width: 8px; cursor: ew-resize; background: rgba(255,255,255,.18); }
+.griff:hover { background: var(--orange); }
+.griff.links { left: 0; }
+.griff.rechts { right: 0; }
+.spur-musik { margin-top: 4px; height: 16px; }
+.musik-balken { height: 100%; line-height: 16px; padding: 0 .4rem; border-radius: 3px; background: #2f6b50; color: #fff; font-size: .7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ut-block { position: absolute; top: 0; height: 100%; background: var(--lila); border-radius: 2px; opacity: .85; }
 .abspielkopf { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--orange); box-shadow: 0 0 0 1px rgba(0,0,0,.5); pointer-events: none; transform: translateX(-1px); }
 .abspielkopf::before { content: ""; position: absolute; top: -2px; left: -5px; border: 6px solid transparent; border-top-color: var(--orange); }

@@ -120,7 +120,7 @@ export function designMenu(a) {
   };
 }
 
-export const LOGO_STIL_TEXT = { auto: "ohne Fläche, passend zum Bild", plakette: "auf Fläche (Plakette)", frei: "ohne Fläche, immer hell" };
+export const LOGO_STIL_TEXT = { auto: "ohne Fläche, passend zum Bild", glas: "dunkles Glas", plakette: "auf Fläche (Plakette)", frei: "ohne Fläche, immer hell" };
 
 export function logoMenu(a, ctx, treffer = null, suche = "") {
   const knoepfe = [];

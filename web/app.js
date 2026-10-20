@@ -20,13 +20,13 @@ function el(tag, attrs = {}, ...kinder) {
     else if (v === true) e.setAttribute(k, "");
     else e.setAttribute(k, v);
   }
-  for (const kind of kinder.flat()) if (kind !== null && kind !== undefined && kind !== false) e.append(kind instanceof Node ? kind : String(kind));
+  for (const kind of kinder.flat(Infinity)) if (kind !== null && kind !== undefined && kind !== false) e.append(kind instanceof Node ? kind : String(kind));
   return e;
 }
 
 /** Wie replaceChildren, aber null/undefined/false werden weggelassen (statt als Text „null“ zu erscheinen). */
 function ersetzen(ziel, ...kinder) {
-  ziel.replaceChildren(...kinder.flat().filter((k) => k !== null && k !== undefined && k !== false));
+  ziel.replaceChildren(...kinder.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
 }
 
 async function anfrage(pfad, { methode = "GET", json, body, kopf = {}, roh = false } = {}) {
@@ -257,6 +257,62 @@ function schnittCues(cues, schnitt) {
   });
   return ergebnis.sort((x, y) => x.start - y.start);
 }
+// Tonspur (gleiche Rechnung wie in src/schnitt.mjs): null = Ton am Bild, sonst Abschnitte auf der Zeitachse
+const tonLaenge = (s) => s.bis - s.von;
+const tonEnde = (s) => s.ab + s.bis - s.von;
+const r3 = (n) => Math.round(n * 1000) / 1000;
+function tonAusSchnitt(schnitt) {
+  const anfaenge = teilAnfaenge(schnitt);
+  return schnitt.map((t, i) => {
+    const s = { quelle: t.clip, von: t.von, bis: t.bis, ab: r3(anfaenge[i]) };
+    if (t.lautstaerke !== undefined && t.lautstaerke !== 1) s.lautstaerke = t.lautstaerke;
+    if (t.stumm) s.stumm = true;
+    if (ueberlappung(schnitt, i)) s.ein = ueberlappung(schnitt, i);
+    if (ueberlappung(schnitt, i + 1)) s.aus = ueberlappung(schnitt, i + 1);
+    return s;
+  });
+}
+function cuesJeQuelle(cues, tonclips) {
+  const je = new Map();
+  cues.forEach((c, index) => {
+    if (!je.has(c.clip)) je.set(c.clip, []);
+    je.get(c.clip).push({ ...c, index });
+  });
+  for (const t of tonclips) {
+    if (je.has(t.id) || !t.sync?.length) continue;
+    je.set(t.id, t.sync.flatMap(({ clip, versatz }) => (je.get(clip) ?? []).map((c) => ({ ...c, clip: t.id, start: c.start + versatz * 1000, end: c.end + versatz * 1000 }))));
+  }
+  return je;
+}
+function tonCues(cues, spur, tonclips) {
+  const je = cuesJeQuelle(cues, tonclips);
+  const ergebnis = [];
+  for (const s of spur) {
+    if (s.stumm || s.lautstaerke === 0) continue;
+    for (const c of je.get(s.quelle) ?? []) {
+      if (c.end <= s.von * 1000 || c.start >= s.bis * 1000) continue;
+      const start = Math.round(Math.max(c.start, s.von * 1000) - s.von * 1000 + s.ab * 1000);
+      const end = Math.round(Math.min(c.end, s.bis * 1000) - s.von * 1000 + s.ab * 1000);
+      if (end - start >= 200) ergebnis.push({ start, end, text: c.text, index: c.index });
+    }
+  }
+  const gesehen = new Set();
+  return ergebnis.sort((x, y) => x.start - y.start).filter((c) => {
+    const k = `${c.index}:${Math.round(c.start / 500)}`;
+    return gesehen.has(k) ? false : (gesehen.add(k), true);
+  });
+}
+/** Abschnitte auf Zeilen verteilen, damit sich überlappende nicht verdecken. */
+function tonZeilen(spur) {
+  const enden = [];
+  return spur.map((s) => {
+    let z = enden.findIndex((e) => e <= s.ab + 0.001);
+    if (z < 0) z = enden.length;
+    enden[z] = tonEnde(s);
+    return z;
+  });
+}
+
 const zeitGenau = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 
 /**
@@ -267,6 +323,11 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   const clips = new Map(a.clips.map((c) => [c.id, c]));
   let schnitt = structuredClone(a.schnitt);
   let cues = structuredClone(a.untertitel);
+  // Tonspur: null = Ton hängt am Bild; sonst eigenständige Abschnitte (siehe src/schnitt.mjs)
+  let tonspur = a.tonspur ? structuredClone(a.tonspur) : null;
+  const tonclips = new Map((a.tonclips ?? []).map((t) => [t.id, t]));
+  let tonAuswahl = null;
+  let ebene = "bild"; // worauf S und Entf wirken: Bild oder Ton
   let auswahl = 0;
   let zeit = 0;
   let aktiv = 0; // Teil, der gerade im Player liegt
@@ -284,17 +345,92 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   const zeitleiste = el("div", { class: "zeitleiste", tabindex: "0", "aria-label": "Zeitleiste – klicken oder ziehen zum Springen" });
   const teileSpur = el("div", { class: "spur-teile" });
   const utSpur = el("div", { class: "spur-ut" });
+  const tonSpur = el("div", { class: "spur-ton", "aria-label": "Tonspur" });
+  const musikSpur = el("div", { class: "spur-musik" });
+  const tonKopf = el("div", { class: "ton-kopf" });
   const abspielkopf = el("div", { class: "abspielkopf" });
-  zeitleiste.append(teileSpur, utSpur, abspielkopf);
+  zeitleiste.append(teileSpur, tonSpur, musikSpur, utSpur, abspielkopf);
   const teilInfo = el("div");
   const clipListe = el("div");
   const cueListe = el("ol", { class: "cues" });
 
-  const speichernSchnitt = verzoegert(() => anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { schnitt } }).catch((err) => meldung(hinweis, err.message)), 600);
+  const speichernSchnitt = verzoegert(() => anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { schnitt, tonspur } }).catch((err) => meldung(hinweis, err.message)), 600);
   const speichernCues = verzoegert(() => anfrage(`auftrag/${id}/speichern`, { methode: "POST", json: { untertitel: cues } }).catch((err) => meldung(hinweis, err.message)), 800);
 
   const dauer = () => schnittDauer(schnitt);
   const sagen = (text) => (hinweis.textContent = text);
+  const ausCues = () => (tonspur ? tonCues(cues, tonspur, [...tonclips.values()]) : schnittCues(cues, schnitt));
+  const spurJetzt = () => tonspur ?? tonAusSchnitt(schnitt);
+  const quelleDauer = (q) => clips.get(q)?.dauer ?? tonclips.get(q)?.dauer ?? 0;
+  const quelleName = (q) => clips.get(q)?.name ?? tonclips.get(q)?.name ?? q;
+  const istAufnahme = (q) => tonclips.has(q);
+  const welleUrl = (q) => (istAufnahme(q) ? `/api/auftrag/${id}/tonclip/${q}/welle` : clips.get(q)?.welle ? `/api/auftrag/${id}/clip/${q}/welle` : null);
+
+  // --- Gelöster Ton zum Vorhören: Web Audio spielt die Abschnitte genau wie im fertigen Video ---
+  let tonKontext = null;
+  const puffer = new Map();
+  let laufend = [];
+  const kontext = () => (tonKontext ??= new AudioContext());
+  function pufferLaden(q) {
+    if (!puffer.has(q)) {
+      const url = istAufnahme(q) ? `/api/auftrag/${id}/tonclip/${q}/ton` : `/api/auftrag/${id}/clip/${q}/ton`;
+      const p = fetch(url).then((r) => {
+        if (!r.ok) throw new Error("Ton lässt sich nicht laden.");
+        return r.arrayBuffer();
+      }).then((b) => kontext().decodeAudioData(b));
+      p.catch(() => puffer.delete(q));
+      puffer.set(q, p);
+    }
+    return puffer.get(q);
+  }
+  const benutzteQuellen = () => [...new Set((tonspur ?? []).filter((x) => !x.stumm).map((x) => x.quelle))].filter((q) => quelleDauer(q));
+  function tonStoppen() {
+    for (const q of laufend) {
+      try {
+        q.stop();
+      } catch {}
+    }
+    laufend = [];
+  }
+  async function tonStarten(ab) {
+    tonStoppen();
+    if (!tonspur || !spielt) return;
+    const ctx = kontext();
+    await ctx.resume().catch(() => {});
+    const buffer = new Map();
+    for (const q of benutzteQuellen()) {
+      try {
+        buffer.set(q, await pufferLaden(q));
+      } catch {}
+    }
+    if (!spielt) return;
+    const t0 = ctx.currentTime + 0.03;
+    const ende = dauer();
+    for (const x of tonspur) {
+      const buf = buffer.get(x.quelle);
+      if (!buf || x.stumm || tonEnde(x) <= ab || x.ab >= ende) continue;
+      const len = Math.min(tonLaenge(x), ende - x.ab);
+      const lokal = Math.max(0, ab - x.ab); // so weit ist der Abschnitt schon
+      const start = t0 + Math.max(0, x.ab - ab);
+      const v = x.lautstaerke ?? 1;
+      const ein = Math.min(x.ein ?? 0, len / 2);
+      const aus = Math.min(x.aus ?? 0, len / 2);
+      const g = ctx.createGain();
+      const pegel = (l) => v * Math.min(1, ein ? l / ein : 1, aus ? (len - l) / aus : 1);
+      g.gain.setValueAtTime(pegel(lokal), start);
+      if (lokal < ein) g.gain.linearRampToValueAtTime(v, start + ein - lokal);
+      if (aus) {
+        const ab2 = Math.max(lokal, len - aus);
+        g.gain.setValueAtTime(pegel(ab2), start + ab2 - lokal);
+        g.gain.linearRampToValueAtTime(0, start + len - lokal);
+      }
+      const q = ctx.createBufferSource();
+      q.buffer = buf;
+      q.connect(g).connect(ctx.destination);
+      q.start(start, x.von + lokal, len - lokal);
+      laufend.push(q);
+    }
+  }
 
   // --- Abspielen ---
   async function laden(clipId) {
@@ -310,6 +446,10 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   }
   /** Lautstärke des Teils im Player (über 100 % hört man erst im fertigen Video). */
   function tonDesTeils() {
+    if (tonspur) {
+      video.muted = true; // der Ton kommt aus der Tonspur
+      return;
+    }
     const teil = schnitt[aktiv];
     video.muted = Boolean(teil?.stumm);
     video.volume = Math.min(1, teil?.lautstaerke ?? 1);
@@ -345,16 +485,20 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
       sagen(err.message);
     }
     if (!spielt) musikMit(false);
+    else if (tonspur) tonStarten(zeit);
     anzeigen();
   }
   async function abspielen() {
     if (spielt) return pause();
     if (zeit >= dauer() - 0.05) await springe(0);
     else await springe(zeit);
+    if (tonspur && benutzteQuellen().some((q) => !puffer.has(q))) sagen("🔊 Lade den Ton …");
+    if (tonspur) await Promise.all(benutzteQuellen().map((q) => pufferLaden(q).catch(() => {})));
     spielt = true;
     knopfPlay.textContent = "⏸";
     musikMit(true);
     await video.play().catch(() => {});
+    tonStarten(zeit);
     requestAnimationFrame(schleife);
   }
   function pause() {
@@ -362,6 +506,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     knopfPlay.textContent = "▶";
     video.pause();
     musik.pause();
+    tonStoppen();
   }
   /** Übergang im Player andeuten (das echte xfade gibt es im fertigen Video). */
   function uebergangZeigen(u) {
@@ -394,9 +539,11 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
           tonDesTeils();
           uebergangZeigen(naechster.uebergang);
           try {
+            if (tonspur) tonStoppen(); // nach dem Clipwechsel neu ansetzen, damit Bild und Ton zusammenbleiben
             await laden(naechster.clip);
             video.currentTime = naechster.von;
             await video.play();
+            if (tonspur) tonStarten(anfaenge[aktiv] ?? zeit);
           } catch (err) {
             sagen(err.message);
             pause();
@@ -411,7 +558,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
 
   // --- Bearbeiten ---
   function aendern(fn, text) {
-    verlauf.push(structuredClone({ schnitt, cues }));
+    verlauf.push(structuredClone({ schnitt, cues, tonspur }));
     if (verlauf.length > 100) verlauf.shift();
     zukunft.length = 0;
     fn();
@@ -432,6 +579,8 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   function nachAenderung(text) {
     uebergaengeBegrenzen();
     auswahl = Math.max(0, Math.min(auswahl, schnitt.length - 1));
+    if (!tonspur || tonAuswahl >= tonspur.length) tonAuswahl = null;
+    if (!tonspur && ebene === "ton") ebene = "bild";
     zeit = Math.min(zeit, Math.max(0, dauer() - 0.001));
     speichernSchnitt();
     speichernCues();
@@ -442,8 +591,8 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   }
   function rueckgaengig(nach = verlauf, von = zukunft, text = "Rückgängig gemacht.") {
     if (!nach.length) return sagen("Nichts mehr rückgängig zu machen.");
-    von.push(structuredClone({ schnitt, cues }));
-    ({ schnitt, cues } = nach.pop());
+    von.push(structuredClone({ schnitt, cues, tonspur }));
+    ({ schnitt, cues, tonspur } = nach.pop());
     nachAenderung(text);
   }
   const wiederholen = () => rueckgaengig(zukunft, verlauf, "Wiederholt.");
@@ -538,10 +687,29 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   }
 
   // --- Untertitel ---
+  /** Wo im Ton (Quelle und Zeit) die Abspielposition liegt; bei synchronen Aufnahmen in der Zeit ihres Clips. */
+  function tonOrt() {
+    if (!tonspur) {
+      const o = imClip(schnitt, zeit);
+      return { clip: o.clip, t: o.t, bis: schnitt[o.index].bis };
+    }
+    const x = tonspur.findLast((y) => !y.stumm && y.ab <= zeit && zeit < tonEnde(y));
+    if (!x) return null;
+    let clip = x.quelle;
+    let t = x.von + zeit - x.ab;
+    let bis = x.bis;
+    const sync = tonclips.get(clip)?.sync;
+    if (sync?.length && !cues.some((c) => c.clip === clip)) {
+      clip = sync[0].clip;
+      t -= sync[0].versatz;
+      bis -= sync[0].versatz;
+    }
+    return { clip, t, bis };
+  }
   function cueHier() {
-    const ort = imClip(schnitt, zeit);
-    const teil = schnitt[ort.index];
-    const ende = Math.min(teil.bis, ort.t + 2);
+    const ort = tonOrt();
+    if (!ort) return sagen("Hier ist kein Ton – Untertitel gehören zu hörbarem Ton.");
+    const ende = Math.min(ort.bis, ort.t + 2);
     if (ende - ort.t < 0.3) return sagen("Zu nah am Ende des Teils.");
     aendern(() => {
       cues.push({ clip: ort.clip, start: Math.round(ort.t * 1000), end: Math.round(ende * 1000), text: "Neuer Untertitel" });
@@ -552,7 +720,8 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   }
   function cueGrenze(seite) {
     if (aktiverCue === null || !cues[aktiverCue]) return sagen("Erst einen Untertitel in der Liste antippen.");
-    const ort = imClip(schnitt, zeit);
+    const ort = tonOrt();
+    if (!ort) return sagen("Hier ist kein Ton.");
     const c = cues[aktiverCue];
     if (ort.clip !== c.clip) return sagen("Die Abspielposition liegt in einem anderen Clip als dieser Untertitel.");
     const ms = Math.round(ort.t * 1000);
@@ -568,7 +737,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     abspielkopf.style.left = `${d ? (zeit / d) * 100 : 0}%`;
     zeitAnzeige.textContent = `${zeitGenau(zeit)} / ${zeitGenau(d)}`;
     const ms = zeit * 1000;
-    const jetzt = schnittCues(cues, schnitt).find((c) => ms >= c.start && ms < c.end);
+    const jetzt = ausCues().find((c) => ms >= c.start && ms < c.end);
     untertitelZeile.hidden = !jetzt;
     untertitelZeile.textContent = jetzt?.text ?? "";
     for (const li of cueListe.children) li.classList.toggle("jetzt", Number(li.dataset.index) === jetzt?.index);
@@ -582,15 +751,15 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
       const breite = `${(clip.dauer / td) * 100}%`;
       const links = `${(-teil.von / td) * 100}%`;
       return el("div", {
-        class: `teil${i === auswahl ? " gewaehlt" : ""}`, style: { flexGrow: String(td) },
+        class: `teil${i === auswahl && ebene === "bild" ? " gewaehlt" : ""}`, style: { flexGrow: String(td) },
         title: `${clip.name}: ${zeitGenau(teil.von)}–${zeitGenau(teil.bis)}${teil.uebergang ? ` · ${optionen.uebergaenge[teil.uebergang.art]} ${teil.uebergang.dauer} s` : ""}`,
       },
       teil.uebergang ? el("span", { class: "uebergang-marke", "aria-hidden": "true" }, "⧓") : null,
       clip.bereit && clip.bilder ? el("img", { class: "streifen", src: `/api/auftrag/${id}/clip/${clip.id}/streifen`, alt: "", draggable: "false", style: { width: breite, left: links } }) : el("span", { class: "leise" }, "wird vorbereitet …"),
-      clip.welle ? el("img", { class: "welle", src: `/api/auftrag/${id}/clip/${clip.id}/welle`, alt: "", draggable: "false", style: { width: breite, left: links } }) : null,
       el("span", { class: "teil-name" }, `${teil.stumm ? "🔇 " : teil.lautstaerke !== undefined && teil.lautstaerke !== 1 ? `🔊${Math.round(teil.lautstaerke * 100)} % ` : ""}${clips.size > 1 ? clip.name : i + 1}`));
     }));
-    const aus = schnittCues(cues, schnitt);
+    zeichnenTon();
+    const aus = ausCues();
     ersetzen(utSpur, ...aus.map((c) => el("div", {
       class: "ut-block", title: c.text,
       style: { left: `${(c.start / 1000 / d) * 100}%`, width: `${((c.end - c.start) / 1000 / d) * 100}%` },
@@ -609,7 +778,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
           el("input", { type: "number", min: "0.1", max: "2", step: "0.1", value: String(teil.uebergang.dauer), "aria-label": "Dauer des Übergangs in Sekunden",
             onchange: (ev) => uebergangSetzen(auswahl, { ...teil.uebergang, dauer: Number(ev.target.value) }) }), "s") : null,
         schnitt.length > 2 ? el("button", { type: "button", class: "zweit klein", title: "Diesen Übergang an allen Schnitten verwenden", onclick: () => uebergangSetzen("alle", teil.uebergang ?? null) }, "für alle Schnitte") : null) : null,
-      el("div", { class: "reihe ton-teil" },
+      tonspur ? el("p", { class: "leise" }, "🔓 Der Ton ist vom Bild gelöst – Lautstärke und Blenden unten in der Tonspur.") : el("div", { class: "reihe ton-teil" },
         el("label", { class: "zeile" }, "🔊",
           el("input", { type: "range", min: "0", max: "200", step: "5", value: String(Math.round((teil.lautstaerke ?? 1) * 100)), "aria-label": "Lautstärke dieses Teils",
             disabled: Boolean(teil.stumm), oninput: (ev) => (ev.target.nextSibling.textContent = `${ev.target.value} %`), onchange: (ev) => tonSetzen({ lautstaerke: Number(ev.target.value) / 100 }) }),
@@ -619,6 +788,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
         el("button", { type: "button", class: "zweit klein", onclick: () => verschieben(-1), disabled: auswahl === 0 }, "◀ früher"),
         el("button", { type: "button", class: "zweit klein", onclick: () => verschieben(1), disabled: auswahl === schnitt.length - 1 }, "später ▶"),
         el("button", { type: "button", class: "zweit klein", onclick: () => entfernen(), disabled: schnitt.length < 2 }, "🗑️ Teil entfernen")));
+    if (ebene === "ton" && tonspur && tonAuswahl !== null) ersetzen(teilInfo, ...tonInfo());
     ersetzen(clipListe, 
       el("strong", {}, "Clips"),
       el("ul", { class: "clipliste" }, [...clips.values()].map((c) => el("li", {},
@@ -634,7 +804,16 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
               sagen(err.message);
             }
           } }, "✕") : null)))),
-      clipHochladen);
+      clipHochladen,
+      el("strong", {}, "Tonaufnahmen"),
+      tonclips.size ? el("ul", { class: "clipliste" }, [...tonclips.values()].map((t) => el("li", {},
+        el("span", {}, `🎙️ ${t.name} · ${zeitGenau(t.dauer)} · `,
+          t.sync.length ? el("span", { class: "gut", title: t.sync.map((x) => `${quelleName(x.clip)}: ${x.versatz.toFixed(2)} s (Güte ${x.guete})`).join("\n") }, `🎯 synchron zu ${t.sync.map((x) => quelleName(x.clip)).join(", ")}`) : el("span", { class: "leise" }, "nicht ausgerichtet")),
+        el("span", { class: "reihe" },
+          el("button", { type: "button", class: "zweit klein", title: "Ganze Aufnahme an der Abspielposition in die Tonspur legen", onclick: () => tonEinfuegen(t.id) }, "+ hier"),
+          el("button", { type: "button", class: "zweit klein", title: "Passende Stelle in den Clips suchen und dort den Kamera-Ton ersetzen", onclick: () => tonclipAktion(t, "ausrichten") }, "🎯"),
+          el("button", { type: "button", class: "zweit klein", title: "Aufnahme aus dem Projekt löschen", onclick: () => confirm(`„${t.name}“ löschen?`) && tonclipAktion(t, "entfernen") }, "✕"))))) : null,
+      tonHochladen);
     ersetzen(cueListe, ...aus.map((c) => {
       const eingabe = el("input", { type: "text", maxlength: 300, "aria-label": `Untertitel ab ${zeitGenau(c.start / 1000)}`, oninput: () => {
         cues[c.index] = { ...cues[c.index], text: eingabe.value };
@@ -663,6 +842,268 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   function markieren() {
     for (const li of cueListe.children) li.classList.toggle("aktiv", Number(li.dataset.index) === aktiverCue);
   }
+
+  // --- Tonspur ---
+  const ZEILE = 38; // Höhe einer Zeile der Tonspur in px
+  function abschnittStil(elem, x, d) {
+    const len = tonLaenge(x);
+    elem.style.left = `${(x.ab / d) * 100}%`;
+    elem.style.width = `${(len / d) * 100}%`;
+    const bild = elem.querySelector(".welle");
+    if (bild) {
+      bild.style.width = `${((quelleDauer(x.quelle) || len) / len) * 100}%`;
+      bild.style.left = `${(-x.von / len) * 100}%`;
+    }
+    for (const [cls, feld] of [["ein", "ein"], ["aus", "aus"]]) {
+      const b = elem.querySelector(`.blende.${cls}`);
+      if (b) b.style.width = `${((x[feld] ?? 0) / len) * 100}%`;
+    }
+  }
+  function zeichnenTon() {
+    const d = dauer() || 1;
+    const spur = spurJetzt();
+    const reihenfolge = spur.map((x, i) => i).sort((p, q) => spur[p].ab - spur[q].ab);
+    const zeilenSortiert = tonZeilen(reihenfolge.map((i) => spur[i]));
+    const zeilen = [];
+    reihenfolge.forEach((i, k) => (zeilen[i] = zeilenSortiert[k]));
+    tonSpur.style.height = `${Math.max(1, ...zeilen.map((z) => z + 1)) * ZEILE}px`;
+    tonSpur.classList.toggle("gekoppelt", !tonspur);
+    ersetzen(tonSpur, ...spur.map((x, i) => {
+      const len = tonLaenge(x);
+      const w = welleUrl(x.quelle);
+      const elem = el("div", {
+        class: `ton-abschnitt${istAufnahme(x.quelle) ? " aufnahme" : ""}${x.stumm ? " stumm" : ""}${tonspur && ebene === "ton" && tonAuswahl === i ? " gewaehlt" : ""}`,
+        style: { top: `${zeilen[i] * ZEILE}px` },
+        title: `${quelleName(x.quelle)}: ${zeitGenau(x.von)}–${zeitGenau(x.bis)} · im Video ab ${zeitGenau(x.ab)}${tonspur ? " – ziehen zum Verschieben, Ränder zum Kürzen, mit Alt den Inhalt verschieben" : " – ziehen löst den Ton vom Bild"}`,
+        onpointerdown: (ev) => tonZiehen(ev, i, "mitte"),
+      },
+      w ? el("img", { class: "welle", src: w, alt: "", draggable: "false" }) : el("span", { class: "leise" }, "kein Bild der Welle"),
+      el("span", { class: "blende ein" }), el("span", { class: "blende aus" }),
+      el("span", { class: "ton-name" }, `${x.stumm ? "🔇 " : ""}${x.lautstaerke !== undefined && x.lautstaerke !== 1 ? `${Math.round(x.lautstaerke * 100)} % · ` : ""}${istAufnahme(x.quelle) ? "🎙️ " : ""}${quelleName(x.quelle)}`),
+      tonspur ? el("span", { class: "griff links", onpointerdown: (ev) => tonZiehen(ev, i, "links") }) : null,
+      tonspur ? el("span", { class: "griff rechts", onpointerdown: (ev) => tonZiehen(ev, i, "rechts") }) : null);
+      abschnittStil(elem, x, d);
+      return elem;
+    }));
+    const m = ton()?.musik;
+    musikSpur.hidden = !m;
+    if (m) ersetzen(musikSpur, el("div", { class: "musik-balken", title: `Hintergrundmusik: ${m.name} – Einstellungen unter „Ton“` }, `🎵 ${m.name} · ${Math.round((m.lautstaerke ?? 0.25) * 100)} %${m.ducking !== false ? " · leiser unter Sprache" : ""}`));
+    ersetzen(tonKopf,
+      el("strong", {}, "🔊 Ton"),
+      tonspur
+        ? el("span", { class: "leise" }, "eigenständig – Schnitte im Bild ändern ihn nicht")
+        : el("span", { class: "leise" }, "hängt am Bild – jeder Teil bringt seinen Ton mit"),
+      tonspur
+        ? knopf("🔗 Wieder ans Bild koppeln", "Tonspur verwerfen, der Ton folgt wieder dem Bild", tonKoppeln)
+        : knopf("🔓 Ton vom Bild lösen", "Ton eigenständig schneiden: verschieben, J-/L-Schnitte, Blenden, eigene Aufnahmen", tonLoesen),
+      knopf("🎙️ Tonaufnahme dazu", "Z. B. vom Ansteckmikrofon – der Bot sucht die passende Stelle selbst", () => tonDatei.click()));
+  }
+  function tonInfo() {
+    const x = tonspur[tonAuswahl];
+    const zahl = (feld, label, max) => el("label", { class: "zeile" }, label,
+      el("input", { type: "number", step: "0.1", min: "0", max: String(max), value: (x[feld] ?? 0).toFixed(2), "aria-label": label,
+        onchange: (ev) => abschnittAendern(feld, Number(ev.target.value)) }));
+    return [
+      el("strong", {}, `Tonabschnitt ${tonAuswahl + 1} von ${tonspur.length}`), " · ", istAufnahme(x.quelle) ? "🎙️ " : "", quelleName(x.quelle),
+      el("div", { class: "reihe zahlen" }, zahl("ab", "im Video ab", dauer()), el("span", { class: "leise" }, "s")),
+      el("div", { class: "reihe zahlen" }, zahl("von", "aus der Quelle von", quelleDauer(x.quelle)), zahl("bis", "bis", quelleDauer(x.quelle)), el("span", { class: "leise" }, `s (${zeitGenau(quelleDauer(x.quelle))})`)),
+      el("div", { class: "reihe zahlen" }, zahl("ein", "Einblenden", 5), zahl("aus", "Ausblenden", 5), el("span", { class: "leise" }, "s")),
+      el("div", { class: "reihe ton-teil" },
+        el("label", { class: "zeile" }, "🔊",
+          el("input", { type: "range", min: "0", max: "200", step: "5", value: String(Math.round((x.lautstaerke ?? 1) * 100)), "aria-label": "Lautstärke dieses Abschnitts",
+            disabled: Boolean(x.stumm), oninput: (ev) => (ev.target.nextSibling.textContent = `${ev.target.value} %`), onchange: (ev) => abschnittAendern("lautstaerke", Number(ev.target.value) / 100) }),
+          el("span", { class: "leise" }, `${Math.round((x.lautstaerke ?? 1) * 100)} %`)),
+        el("label", { class: "zeile" }, el("input", { type: "checkbox", checked: Boolean(x.stumm), onchange: (ev) => abschnittAendern("stumm", ev.target.checked) }), "stumm")),
+      el("div", { class: "reihe" },
+        knopf("✂️ Teilen", "Abschnitt an der Abspielposition teilen (S)", tonTeilen),
+        knopf("⇥ Hierher", "Abschnitt beginnt an der Abspielposition", () => abschnittAendern("ab", zeit)),
+        knopf("🗑️", "Abschnitt entfernen (Entf)", tonEntfernen),
+        knopf("🎞️ Zum Bild", "Wieder die Teile des Bildes bearbeiten", () => {
+          ebene = "bild";
+          zeichnen();
+        })),
+    ];
+  }
+  function tonLoesen() {
+    aendern(() => {
+      tonspur = tonAusSchnitt(schnitt);
+      ebene = "ton";
+      tonAuswahl = Math.min(auswahl, tonspur.length - 1);
+    }, "🔓 Ton gelöst – Abschnitte ziehen, an den Rändern kürzen, S teilt, Entf entfernt.");
+  }
+  function tonKoppeln() {
+    if (!confirm("Ton wieder ans Bild koppeln? Die eigene Tonspur (Verschiebungen, Blenden, Aufnahmen darin) geht verloren – Rückgängig geht.")) return;
+    aendern(() => {
+      tonspur = null;
+      tonAuswahl = null;
+      ebene = "bild";
+    }, "🔗 Ton folgt wieder dem Bild.");
+  }
+  /** Der Abschnitt an der Abspielposition: der gewählte, wenn er dort liegt, sonst der oberste. */
+  function abschnittHier() {
+    if (!tonspur) return null;
+    const passt = (i) => tonspur[i] && tonspur[i].ab <= zeit && zeit < tonEnde(tonspur[i]);
+    if (tonAuswahl !== null && passt(tonAuswahl)) return tonAuswahl;
+    const i = tonspur.findLastIndex((_, k) => passt(k));
+    return i < 0 ? null : i;
+  }
+  function tonTeilen() {
+    const i = abschnittHier();
+    if (i === null) return sagen("An der Abspielposition liegt kein Tonabschnitt.");
+    const x = tonspur[i];
+    const lokal = zeit - x.ab;
+    if (lokal < 0.1 || tonLaenge(x) - lokal < 0.1) return sagen("Zu nah am Rand des Abschnitts.");
+    aendern(() => {
+      const vorne = { ...x, bis: r3(x.von + lokal) };
+      delete vorne.aus;
+      const hinten = { ...x, von: r3(x.von + lokal), ab: r3(zeit) };
+      delete hinten.ein;
+      tonspur.splice(i, 1, vorne, hinten);
+      tonAuswahl = i + 1;
+      ebene = "ton";
+    }, "✂️ Ton geteilt.");
+  }
+  function tonEntfernen() {
+    const i = tonAuswahl ?? abschnittHier();
+    if (i === null) return sagen("Erst einen Tonabschnitt antippen.");
+    aendern(() => {
+      tonspur.splice(i, 1);
+      tonAuswahl = null;
+    }, "🗑️ Tonabschnitt entfernt.");
+  }
+  function abschnittAendern(feld, wert) {
+    const x = { ...tonspur[tonAuswahl] };
+    const q = quelleDauer(x.quelle);
+    if (feld === "stumm") x.stumm = wert;
+    else if (!Number.isFinite(wert)) return;
+    else if (feld === "lautstaerke") x.lautstaerke = Math.max(0, Math.min(2, wert));
+    else if (feld === "ab") x.ab = r3(Math.max(0, Math.min(wert, dauer() - 0.1)));
+    else if (feld === "von") x.von = r3(Math.max(0, Math.min(wert, x.bis - 0.1)));
+    else if (feld === "bis") x.bis = r3(Math.min(q, Math.max(wert, x.von + 0.1)));
+    else x[feld] = Math.round(Math.max(0, Math.min(5, wert, tonLaenge(x) / 2)) * 100) / 100;
+    for (const f of ["ein", "aus"]) if (x[f] !== undefined) x[f] = Math.min(x[f], tonLaenge(x) / 2);
+    if (x.lautstaerke === 1) delete x.lautstaerke;
+    if (!x.stumm) delete x.stumm;
+    for (const f of ["ein", "aus"]) if (!x[f]) delete x[f];
+    aendern(() => (tonspur[tonAuswahl] = x), feld === "stumm" ? (wert ? "🔇 Abschnitt stumm." : "🔊 Abschnitt wieder hörbar.") : null);
+  }
+  function tonEinfuegen(q) {
+    aendern(() => {
+      tonspur ??= tonAusSchnitt(schnitt);
+      tonspur.push({ quelle: q, von: 0, bis: r3(quelleDauer(q)), ab: r3(Math.min(zeit, dauer() - 0.1)) });
+      tonAuswahl = tonspur.length - 1;
+      ebene = "ton";
+    }, `🎙️ „${quelleName(q)}“ ab ${zeitGenau(zeit)} in die Tonspur gelegt.`);
+  }
+  async function tonclipAktion(t, aktion) {
+    sagen(aktion === "ausrichten" ? "🎯 Suche die passende Stelle …" : "Lösche …");
+    try {
+      await sichern();
+      const antwort = await anfrage(`auftrag/${id}/tonclip/${t.id}/${aktion}`, { methode: "POST" });
+      neuLaden(antwort.meldung);
+    } catch (err) {
+      sagen(err.message);
+    }
+  }
+  /** Ziehen in der Tonspur: Mitte verschiebt (mit Alt den Inhalt), Ränder kürzen; rastet an Schnitten und Abspielposition ein. */
+  function tonZiehen(ev, i, art) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    if (spielt) pause();
+    const elem = ev.currentTarget.closest(".ton-abschnitt");
+    elem.setPointerCapture(ev.pointerId);
+    const breite = tonSpur.getBoundingClientRect().width;
+    const proPx = dauer() / breite;
+    const x0 = ev.clientX;
+    const start = { ...spurJetzt()[i] };
+    let vorher = null;
+    const kanten = () => [0, dauer(), zeit, ...teilAnfaenge(schnitt), ...tonspur.flatMap((x, k) => (k === i ? [] : [x.ab, tonEnde(x)]))];
+    const fang = (t) => {
+      let beste = t;
+      let abstand = 6 * proPx;
+      for (const k of kanten()) if (Math.abs(k - t) < abstand) [abstand, beste] = [Math.abs(k - t), k];
+      return beste;
+    };
+    const bewegen = (e2) => {
+      if (!vorher) {
+        if (Math.abs(e2.clientX - x0) < 3) return;
+        vorher = structuredClone({ schnitt, cues, tonspur });
+        if (!tonspur) {
+          tonspur = tonAusSchnitt(schnitt);
+          sagen("🔓 Ton vom Bild gelöst – Schnitte im Bild ändern den Ton jetzt nicht mehr.");
+        }
+      }
+      const dt = (e2.clientX - x0) * proPx;
+      const q = quelleDauer(start.quelle);
+      const x = { ...start };
+      if (art === "mitte" && e2.altKey) {
+        const d = Math.max(-start.von, Math.min(q - start.bis, -dt));
+        x.von = start.von + d;
+        x.bis = start.bis + d;
+      } else if (art === "mitte") {
+        const ab = Math.max(0, start.ab + dt);
+        const vorn = fang(ab);
+        const hinten = fang(ab + tonLaenge(x)) - tonLaenge(x);
+        x.ab = Math.max(0, Math.min(Math.abs(vorn - ab) <= Math.abs(hinten - ab) ? vorn : hinten, dauer() - 0.1));
+      } else if (art === "links") {
+        const d = Math.max(-start.von, -start.ab, Math.min(fang(start.ab + dt) - start.ab, tonLaenge(start) - 0.1));
+        x.von = start.von + d;
+        x.ab = start.ab + d;
+      } else {
+        const d = Math.min(q - start.bis, Math.max(fang(tonEnde(start) + dt) - tonEnde(start), 0.1 - tonLaenge(start)));
+        x.bis = start.bis + d;
+      }
+      for (const f of ["von", "bis", "ab"]) x[f] = r3(x[f]);
+      for (const f of ["ein", "aus"]) if (x[f]) x[f] = Math.min(x[f], tonLaenge(x) / 2);
+      tonspur[i] = x;
+      abschnittStil(elem, x, dauer() || 1);
+      sagen(`${quelleName(x.quelle)}: im Video ${zeitGenau(x.ab)}–${zeitGenau(tonEnde(x))} · aus der Quelle ${zeitGenau(x.von)}–${zeitGenau(x.bis)}`);
+    };
+    const loslassen = (e2) => {
+      elem.removeEventListener("pointermove", bewegen);
+      elem.removeEventListener("pointerup", loslassen);
+      elem.removeEventListener("pointercancel", loslassen);
+      if (!vorher) {
+        // Nur angetippt: auswählen und hinspringen
+        const t = zeitAus(e2);
+        if (tonspur) {
+          tonAuswahl = i;
+          ebene = "ton";
+        } else {
+          auswahl = imClip(schnitt, t).index;
+        }
+        zeichnen();
+        return springe(t);
+      }
+      verlauf.push(vorher);
+      if (verlauf.length > 100) verlauf.shift();
+      zukunft.length = 0;
+      tonAuswahl = i;
+      ebene = "ton";
+      nachAenderung(art === "mitte" ? (e2.altKey ? "↔ Inhalt verschoben." : "↔ Ton verschoben.") : "⇤⇥ Ton gekürzt.");
+    };
+    elem.addEventListener("pointermove", bewegen);
+    elem.addEventListener("pointerup", loslassen);
+    elem.addEventListener("pointercancel", loslassen);
+  }
+
+  // Eigene Tonaufnahme hochladen (z. B. Ansteckmikrofon)
+  const tonFortschritt = el("div", { class: "fortschritt", hidden: true }, el("div"));
+  const tonDatei = el("input", { type: "file", accept: "audio/*", class: "unsichtbar", id: "ton-datei", onchange: async () => {
+    const f = tonDatei.files[0];
+    if (!f) return;
+    tonFortschritt.hidden = false;
+    sagen("⏳ Lade die Aufnahme hoch und suche die passende Stelle in den Clips …");
+    try {
+      await sichern();
+      const antwort = await hochladen(`auftrag/${id}/tonclip?name=${encodeURIComponent(f.name)}`, f, (p) => (tonFortschritt.firstChild.style.width = `${Math.round(p * 100)}%`));
+      neuLaden(antwort.meldung);
+    } catch (err) {
+      sagen(err.message);
+      tonFortschritt.hidden = true;
+    }
+  } });
+  const tonHochladen = el("div", {}, el("label", { for: "ton-datei", class: "knopf zweit klein", tabindex: "0" }, "🎙️ Tonaufnahme hochladen"), tonDatei, tonFortschritt);
 
   // Weiteren Clip hochladen
   const clipFortschritt = el("div", { class: "fortschritt", hidden: true }, el("div"));
@@ -709,7 +1150,13 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     zeitleiste.setPointerCapture(ev.pointerId);
     if (spielt) pause();
     const t = zeitAus(ev);
-    auswahl = imClip(schnitt, t).index;
+    if (tonspur && tonSpur.contains(ev.target)) {
+      ebene = "ton";
+      tonAuswahl = null;
+    } else {
+      ebene = "bild";
+      auswahl = imClip(schnitt, t).index;
+    }
     zeichnen();
     springe(t);
   });
@@ -722,7 +1169,8 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     const strg = ev.ctrlKey || ev.metaKey;
     const t = ev.key.toLowerCase();
     const aktionen = {
-      " ": abspielen, s: teilen, i: () => kuerzen("anfang"), o: () => kuerzen("ende"), delete: () => entfernen(), backspace: () => entfernen(),
+      " ": abspielen, s: () => (ebene === "ton" && tonspur ? tonTeilen() : teilen()), i: () => kuerzen("anfang"), o: () => kuerzen("ende"),
+      delete: () => (ebene === "ton" && tonspur ? tonEntfernen() : entfernen()), backspace: () => (ebene === "ton" && tonspur ? tonEntfernen() : entfernen()),
       arrowleft: () => springe(zeit - (ev.shiftKey ? 1 : 1 / FPS)), arrowright: () => springe(zeit + (ev.shiftKey ? 1 : 1 / FPS)),
       home: () => springe(0), end: () => springe(dauer() - 0.01),
     };
@@ -740,8 +1188,8 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
     el("div", { class: "schnitt-oben" },
       spielerFlaeche,
       el("div", { class: "schnitt-seite" }, teilInfo, clipListe)),
-    werkzeuge, zeitleiste, hinweis,
-    el("p", { class: "leise tasten" }, "Tasten: Leertaste abspielen · ← → ein Bild (mit Umschalt: 1 s) · S teilen · I/O Anfang/Ende hier · Entf Teil entfernen · Strg+Z rückgängig"),
+    werkzeuge, tonKopf, zeitleiste, hinweis,
+    el("p", { class: "leise tasten" }, "Tasten: Leertaste abspielen · ← → ein Bild (mit Umschalt: 1 s) · S teilen · I/O Anfang/Ende hier · Entf entfernen · Strg+Z rückgängig – S und Entf wirken auf Bild oder Ton, je nachdem, was zuletzt angetippt wurde"),
     el("details", { class: "ut-bearbeiten", open: cues.length > 0 },
       el("summary", {}, "Untertitel bearbeiten"),
       el("div", { class: "reihe" },
@@ -754,7 +1202,7 @@ function schnittplatz({ id, a, geaendertMelden, standbildHier, neuLaden, unterti
   async function sichern() {
     await Promise.all([speichernSchnitt.jetzt(), speichernCues.jetzt()]);
   }
-  return { element, stand: () => ({ schnitt, untertitel: cues }), sichern };
+  return { element, stand: () => ({ schnitt, tonspur, untertitel: cues }), sichern, sagen };
 }
 
 // ---------- Editor ----------
@@ -879,7 +1327,7 @@ async function editor(id) {
       el("div", { class: "reihe" },
         el("button", { type: "button", class: "zweit klein", onclick: () => { setze("logo", "kein"); aktualisieren(); } }, "Ohne Logo")),
       ...(istVideo || e.bildStil === "logo" ? [
-        ...auswahl("logoStil", [["auto", "Ohne Fläche, Farbe passend zum Bild"], ["plakette", "Auf Fläche im Design (Plakette)"], ["frei", "Ohne Fläche, immer hell mit Schatten"]], "Logo-Stil"),
+        ...auswahl("logoStil", [["auto", "Ohne Fläche, Farbe passend zum Bild"], ["glas", "Dunkles Glas, helles Logo"], ["plakette", "Auf Fläche im Design (Plakette)"], ["frei", "Ohne Fläche, immer hell mit Schatten"]], "Logo-Stil"),
         ...auswahl("logoPosition", [["oben-links", "oben links"], ["oben-rechts", "oben rechts"], ["unten-links", "unten links"], ["unten-rechts", "unten rechts"]], "Position"),
       ] : []),
     ];
@@ -981,11 +1429,12 @@ async function editor(id) {
     await Promise.all([speichern.jetzt(), platz?.sichern()]);
   }
 
-  async function neuLaden() {
+  async function neuLaden(meldung) {
     await sichern();
     a = await anfrage(`auftrag/${id}`);
     if (a.status === "arbeitet") beobachten();
     else aufbauen();
+    if (meldung) platz?.sagen(meldung);
   }
 
   /** 9:16-Fassung für Instagram/TikTok und Story – nur sinnvoll, wenn das Video nicht schon 9:16 ist. */

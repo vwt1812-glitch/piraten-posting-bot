@@ -223,11 +223,14 @@ export async function sharepic({ breite, hoehe, schema, claim, text = "", logo =
  * „auto“: ohne Fläche, die Farbe richtet sich nach dem Hintergrund – auf hellem (`hell`) das dunkle Logo mit
  * hellem Schein, sonst das helle mit Schatten. „frei“: immer das helle Logo mit Schatten.
  * „plakette“: kompakte, abgerundete Fläche im Farbschema mit Linie unten (wie die Claim-Linie).
+ * „glas“: dunkles Milchglas mit hellem Logo – die Fläche ist halb durchsichtig, den Hintergrund dahinter
+ * zeichnet der Aufrufer weich (`glas.maske` gibt die abgerundete Form, `glas.radius` die Stärke).
  * Bei „auto“ sind die Maße unabhängig von `hell` – die Lage lässt sich also vorher berechnen.
  * @param {number} logoBreite Breite des Logos in Pixeln
- * @returns {Promise<{png:Buffer, breite:number, hoehe:number}>}
+ * @returns {Promise<{png:Buffer, breite:number, hoehe:number, glas?:{maske:Buffer, radius:number}}>}
  */
 export async function logoPlakette({ logo, schema, logoBreite, stil = "auto", hell = false }) {
+  if (stil === "glas") return logoGlas({ logo, logoBreite });
   const frei = stil !== "plakette";
   const dunkel = stil === "auto" && hell;
   const bild = await ladeBild(logoDatei(logo, frei ? (dunkel ? "#000000" : "#ffffff") : schema.schrift));
@@ -256,6 +259,40 @@ export async function logoPlakette({ logo, schema, logoBreite, stil = "auto", he
   }
   ctx.drawImage(bild, innen, innen, lw, lh);
   return { png: await canvas.encode("png"), breite, hoehe };
+}
+
+async function logoGlas({ logo, logoBreite }) {
+  const bild = await ladeBild(logoDatei(logo, "#ffffff"));
+  const lw = Math.round(logoBreite);
+  const lh = Math.round((lw * bild.height) / bild.width);
+  const innen = Math.round(lw * 0.03);
+  const breite = gerade(lw + 2 * innen);
+  const hoehe = gerade(lh + 2 * innen);
+  const ecke = Math.round(lw * 0.06);
+  const form = (ctx) => {
+    ctx.beginPath();
+    ctx.roundRect(0, 0, breite, hoehe, ecke);
+  };
+  const canvas = createCanvas(breite, hoehe);
+  const ctx = canvas.getContext("2d");
+  form(ctx);
+  ctx.fillStyle = "rgba(14,17,22,0.5)";
+  ctx.fill();
+  // feine helle Kante oben wie bei Glas
+  ctx.strokeStyle = "rgba(255,255,255,0.22)";
+  ctx.lineWidth = Math.max(1, Math.round(lw * 0.004));
+  ctx.stroke();
+  ctx.shadowColor = "rgba(0,0,0,0.35)";
+  ctx.shadowBlur = innen * 0.4;
+  ctx.drawImage(bild, innen, innen, lw, lh);
+  const m = createCanvas(breite, hoehe);
+  const mc = m.getContext("2d");
+  mc.fillStyle = "#000";
+  mc.fillRect(0, 0, breite, hoehe);
+  form(mc);
+  mc.fillStyle = "#fff";
+  mc.fill();
+  return { png: await canvas.encode("png"), breite, hoehe, glas: { maske: await m.encode("png"), radius: Math.max(4, Math.min(Math.round(lw * 0.05), Math.floor(Math.min(breite, hoehe) / 4) - 1)), ecke } };
 }
 
 /** Ab dieser mittleren Helligkeit (0–255) gilt der Grund hinter dem Logo als hell. */
@@ -347,6 +384,18 @@ export async function fotoMitLogo({ breite, hoehe, bild, logo, schema, logoBreit
     let g = await logoPlakette(o);
     const { x, y } = logoLage({ masse: { breite, hoehe }, grafik: g, position, video: false });
     if (stil === "auto" && helligkeit(ctx, { x, y, breite: g.breite, hoehe: g.hoehe }) >= HELL_AB) g = await logoPlakette({ ...o, hell: true });
+    if (g.glas) {
+      // Milchglas: das Foto hinter der Fläche weichzeichnen
+      const kopie = createCanvas(breite, hoehe);
+      kopie.getContext("2d").drawImage(canvas, 0, 0);
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(x, y, g.breite, g.hoehe, g.glas.ecke);
+      ctx.clip();
+      ctx.filter = `blur(${g.glas.radius}px)`;
+      ctx.drawImage(kopie, 0, 0);
+      ctx.restore();
+    }
     ctx.drawImage(await loadImage(g.png), x, y);
   }
   return canvas.encode("png");

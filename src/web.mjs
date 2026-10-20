@@ -20,7 +20,7 @@ import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { FARBSCHEMATA, logoNachId, logoDatei } from "./ppicng.mjs";
-import { FORMATE, fotoNormalisieren, sichereEndung, tonUntersuchen } from "./video.mjs";
+import { FORMATE, fotoNormalisieren, sichereEndung, tonUntersuchen, ausfuehren, eingang } from "./video.mjs";
 import { formatSrt } from "./untertitel.mjs";
 import { schnittPruefen, cuesPruefen, schnittDauer, UEBERGAENGE } from "./schnitt.mjs";
 import { kuerzen } from "./caption.mjs";
@@ -95,7 +95,7 @@ export function bereinigen(neu, alt, ppicng) {
   if (!neu || typeof neu !== "object") return e;
   e.design = aus(neu.design, Object.keys(FARBSCHEMATA), alt.design);
   if (typeof neu.logo === "string" && (neu.logo === "kein" || logoNachId(ppicng, neu.logo))) e.logo = neu.logo;
-  e.logoStil = aus(neu.logoStil, ["auto", "plakette", "frei"], alt.logoStil);
+  e.logoStil = aus(neu.logoStil, ["auto", "glas", "plakette", "frei"], alt.logoStil);
   e.logoPosition = aus(neu.logoPosition, ["oben-links", "oben-rechts", "unten-links", "unten-rechts"], alt.logoPosition);
   e.format = aus(neu.format, Object.keys(FORMATE), alt.format);
   e.sharepicFormat = aus(neu.sharepicFormat, SHAREPIC_FORMATE, alt.sharepicFormat);
@@ -164,6 +164,8 @@ export function ansicht(a, werkstatt) {
       bereit: Boolean(c.arbeitskopie), bilder: c.arbeitskopie?.bilder ?? 0, welle: Boolean(c.arbeitskopie?.welle),
     })),
     schnitt,
+    tonspur: a.art === "video" ? werkstatt.tonspur(a) : null,
+    tonclips: werkstatt.tonclips(a).map((t) => ({ id: t.id, name: t.name, dauer: t.dauer, sync: t.sync ?? [] })),
     untertitel: a.art === "video" ? werkstatt.cues(a) : [],
     srt: a.art === "video" ? formatSrt(werkstatt.ausgabeCues(a)) : "",
     caption: a.caption ?? "",
@@ -449,8 +451,9 @@ export async function starteWeb({ config, werkstatt }) {
         const clips = werkstatt.clips(a);
         try {
           if (daten.schnitt !== undefined) werkstatt.schnittSetzen(a, schnittPruefen(daten.schnitt, clips));
+          if (daten.tonspur !== undefined) werkstatt.tonspurSetzen(a, daten.tonspur);
           if (daten.untertitel !== undefined) {
-            werkstatt.cuesSchreiben(a, cuesPruefen(daten.untertitel, clips));
+            werkstatt.cuesSchreiben(a, cuesPruefen(daten.untertitel, [...clips, ...werkstatt.tonclips(a)]));
             auftraege.aendern(a.id, { geaendert: true });
           }
         } catch (e) {
@@ -606,7 +609,60 @@ export async function starteWeb({ config, werkstatt }) {
         const clip = werkstatt.clips(a).find((c) => c.id === clipId);
         const k = clip?.arbeitskopie;
         if (!k) throw new HttpFehler(404, "Die Arbeitskopie ist noch nicht fertig.");
+        if (clipAktion === "ton") {
+          // Ton des Clips als MP3 zum Vorhören der gelösten Tonspur (Web Audio) – beim ersten Abruf erzeugt
+          if (!clip.hatTon) throw new HttpFehler(404, "Der Clip hat keinen Ton.");
+          const mp3 = path.join(path.dirname(k.video), "ton.mp3");
+          if (!fs.existsSync(mp3)) {
+            await werkstatt.arbeit(() => ausfuehren("ffmpeg", ["-y", "-v", "error", ...eingang(k.video), "-vn", "-ac", "1", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "96k", mp3]));
+          }
+          return dateiSenden(req, res, mp3);
+        }
         const datei = { arbeitskopie: k.video, streifen: k.streifen, welle: k.welle }[clipAktion];
+        return dateiSenden(req, res, datei);
+      }
+
+      // Eigene Tonaufnahmen (z. B. Ansteckmikrofon) für die gelöste Tonspur
+      case "POST tonclip": {
+        if (a.art !== "video") throw new HttpFehler(400, "Nur für Videos.");
+        if (fertig) throw new HttpFehler(409, "Schon gepostet.");
+        beschaeftigt();
+        if (clipId) {
+          try {
+            if (clipAktion === "entfernen") werkstatt.tonclipEntfernen(a, clipId);
+            else if (clipAktion === "ausrichten") {
+              const synchron = await werkstatt.arbeit(() => werkstatt.tonclipAusrichten(a, clipId));
+              return senden(res, 200, { ...ansicht(a, werkstatt), meldung: synchron.length ? `Ausgerichtet an: ${synchron.join(", ")}.` : "Keine passende Stelle in den Clips gefunden – bitte von Hand verschieben." });
+            } else throw new HttpFehler(404, "Unbekannte Adresse.");
+          } catch (e) {
+            if (e instanceof HttpFehler) throw e;
+            throw new HttpFehler(400, e.message);
+          }
+          return senden(res, 200, ansicht(a, werkstatt));
+        }
+        grenzenPruefen(nutzer, ip, { upload: true });
+        const name = path.basename(url.searchParams.get("name") ?? "ton.wav");
+        const datei = path.join(a.ordner, `tonclip-${Date.now()}${sichereEndung(name, "ton")}`);
+        await dateiLesen(req, datei);
+        groesseVergessen(config.datenDir);
+        let ergebnis;
+        try {
+          const { dauer } = await tonUntersuchen(datei);
+          if (dauer > w.maxMinuten * 60 * 3) throw new Error(`Die Aufnahme ist länger als ${w.maxMinuten * 3} Minuten.`);
+          ergebnis = await werkstatt.arbeit(() => werkstatt.tonclipHinzufuegen(a, datei, name));
+        } catch (e) {
+          await fsp.rm(datei, { force: true });
+          throw new HttpFehler(400, `Die Tonaufnahme ließ sich nicht verwenden: ${e.message.split("\n")[0]}`);
+        }
+        const meldung = ergebnis.synchron.length
+          ? `🎯 Synchron zu ${ergebnis.synchron.join(", ")} – ersetzt dort den Kamera-Ton (der bleibt stumm in der Spur).`
+          : "Keine passende Stelle in den Clips gefunden – die Aufnahme liegt ab 0:00, bitte von Hand verschieben.";
+        return senden(res, 200, { ...ansicht(a, werkstatt), meldung });
+      }
+      case "GET tonclip": {
+        const t = werkstatt.tonclips(a).find((x) => x.id === clipId);
+        const datei = t && { ton: t.arbeitskopie?.ton, welle: t.arbeitskopie?.welle }[clipAktion];
+        if (!datei) throw new HttpFehler(404, "Gibt es nicht.");
         return dateiSenden(req, res, datei);
       }
 

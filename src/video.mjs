@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { untertitelGroesse, untertitelPosition } from "./untertitel.mjs";
-import { UEBERGAENGE, schnittDauer } from "./schnitt.mjs";
+import { UEBERGAENGE, schnittDauer, tonLaenge } from "./schnitt.mjs";
 import { sharepic, logoPlakette, bauchbinde, eigenesBild, gerade, raender, logoLage, HELL_AB } from "./grafik.mjs";
 
 export { raender, logoLage };
@@ -71,8 +71,8 @@ export async function untersuche(datei) {
   };
 }
 
-export async function tonFuerWhisper(video, wav) {
-  await ausfuehren("ffmpeg", ["-y", "-v", "error", ...eingang(video), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav]);
+export async function tonFuerWhisper(video, wav, art = "video") {
+  await ausfuehren("ffmpeg", ["-y", "-v", "error", ...eingang(video, art), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav]);
 }
 
 /** Musik prüfen: erlaubtes Format, mit Tonspur. @returns {Promise<{dauer:number}>} */
@@ -195,6 +195,73 @@ export function schnittFilter(teile, masse, anpassen, { mitTon = true } = {}) {
   return { eingaben, filter, video: "flaeche", ton: mitTon ? "geschnitten" : null };
 }
 
+/**
+ * Gelöste Tonspur (siehe schnitt.mjs) als Filter: jeder Abschnitt aus seiner Quelle geschnitten, mit Lautstärke
+ * und Blenden an seine Stelle verschoben, alles gemischt – genau so lang wie das Video.
+ * @param {object[]} spur Abschnitte
+ * @param {Map<string,{datei:string, art:"video"|"ton", hatTon:boolean}>} quellen
+ * @param {number} dauer Länge des Videos
+ * @param {number} erster Index des ersten eigenen Eingangs
+ */
+export function tonspurFilter(spur, quellen, dauer, erster) {
+  const hoerbar = spur.filter((s) => quellen.get(s.quelle)?.hatTon && s.ab < dauer);
+  const dateien = [...new Set(hoerbar.map((s) => s.quelle))];
+  const eingaben = dateien.map((q) => ({ datei: quellen.get(q).datei, art: quellen.get(q).art }));
+  const filter = [`anullsrc=r=48000:cl=stereo,atrim=0:${dauer.toFixed(3)}[stille]`];
+  const ausgaenge = new Map();
+  dateien.forEach((q, i) => {
+    const n = hoerbar.filter((s) => s.quelle === q).length;
+    const namen = Array.from({ length: n }, (_, k) => `[q${i}s${k}]`);
+    filter.push(n > 1 ? `[${erster + i}:a]asplit=${n}${namen.join("")}` : `[${erster + i}:a]anull${namen[0]}`);
+    ausgaenge.set(q, { namen, naechste: 0 });
+  });
+  const teile = hoerbar.map((s, k) => {
+    const q = ausgaenge.get(s.quelle);
+    const laenge = Math.min(tonLaenge(s), dauer - s.ab);
+    const ein = Math.max(0.02, Math.min(s.ein ?? 0, laenge / 2));
+    const aus = Math.max(0.02, Math.min(s.aus ?? 0, laenge / 2));
+    const ms = Math.round(s.ab * 1000);
+    filter.push(`${q.namen[q.naechste++]}atrim=start=${s.von.toFixed(3)}:end=${(s.von + laenge).toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,` +
+      `volume=${s.stumm ? 0 : (s.lautstaerke ?? 1)},afade=t=in:d=${ein.toFixed(3)}:curve=tri,afade=t=out:st=${(laenge - aus).toFixed(3)}:d=${aus.toFixed(3)}:curve=tri` +
+      `${ms ? `,adelay=${ms}:all=1` : ""}[ts${k}]`);
+    return `[ts${k}]`;
+  });
+  filter.push(`[stille]${teile.join("")}amix=inputs=${teile.length + 1}:duration=first:normalize=0:dropout_transition=0[geschnitten]`);
+  return { eingaben, filter, ton: "geschnitten" };
+}
+
+/**
+ * Lautstärkekurve einer Aufnahme, ein Wert je 10 ms (für versatzFinden). Mono, 8 kHz – reicht und geht schnell.
+ * @returns {Promise<Float32Array>}
+ */
+export async function huellkurve(datei, art = "video", maxSekunden = 3600) {
+  const roh = await ausfuehren("ffmpeg", ["-v", "error", ...eingang(datei, art), "-vn", "-t", String(maxSekunden), "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"], { binaer: true });
+  const proRahmen = 80;
+  const werte = new Float32Array(Math.floor(roh.length / 2 / proRahmen));
+  for (let i = 0; i < werte.length; i++) {
+    let summe = 0;
+    for (let k = 0; k < proRahmen; k++) {
+      const x = roh.readInt16LE((i * proRahmen + k) * 2) / 32768;
+      summe += x * x;
+    }
+    werte[i] = Math.sqrt(summe / proRahmen);
+  }
+  return werte;
+}
+
+/**
+ * Tonaufnahme für das Bearbeiten im Browser: MP3 (spielt und dekodiert jeder Browser) und die Tonwelle.
+ * @returns {Promise<{ton:string, welle:string}>}
+ */
+export async function tonArbeitskopie(datei, ordner) {
+  const ton = path.join(ordner, "arbeitston.mp3");
+  const welle = path.join(ordner, "welle.png");
+  await ausfuehren("ffmpeg", ["-y", "-v", "error", ...eingang(datei, "ton"), "-vn", "-ac", "1", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "96k", ton]);
+  await ausfuehren("ffmpeg", ["-y", "-v", "error", "-i", ton,
+    "-filter_complex", "aformat=channel_layouts=mono,showwavespic=s=1600x80:colors=0x3fa7d6:scale=sqrt", "-frames:v", "1", welle]);
+  return { ton, welle };
+}
+
 // ---------- Lage der Grafiken ----------
 
 /**
@@ -287,17 +354,25 @@ export async function bereichHelligkeit({ teile, masse, anpassen, x, y, breite, 
  * @param {object} o.video config.video
  * @param {number} [o.standbild] statt des Videos nur ein JPEG dieser Sekunde (ohne Titelkarte, Abspann, Ton)
  */
-export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, logo, ass, fontsDir, zeiten, video, standbild }) {
+export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, logo, ass, fontsDir, zeiten, video, standbild, tonspur = null, tonquellen = null }) {
   teile ??= [{ datei: eingabe, quelle, von: 0, bis: Math.max(0.1, quelle.dauer) }];
   const ordner = path.dirname(ausgabe);
   const masse = zielMasse(e.format, teile[0].quelle);
   const dauer = Math.max(0.1, schnittDauer(teile));
   const mitTon = standbild === undefined;
-  const schnitt = schnittFilter(teile, masse, e.anpassen, { mitTon });
+  // Gelöster Ton: das Bild ohne Ton schneiden, der Ton kommt aus der Tonspur
+  const schnitt = schnittFilter(teile, masse, e.anpassen, { mitTon: mitTon && !tonspur });
   const args = ["-y", "-v", "error"];
   for (const d of schnitt.eingaben) args.push(...eingang(d));
   const filter = [...schnitt.filter];
   let eingang_ = schnitt.eingaben.length;
+  if (mitTon && tonspur) {
+    const t = tonspurFilter(tonspur, tonquellen, dauer, eingang_);
+    for (const d of t.eingaben) args.push(...eingang(d.datei, d.art));
+    eingang_ += t.eingaben.length;
+    filter.push(...t.filter);
+    schnitt.ton = t.ton;
+  }
   const bild = async (name, png, loop = null) => {
     const datei = path.join(ordner, name);
     await fs.writeFile(datei, png);
@@ -327,6 +402,15 @@ export async function renderArgs({ teile, eingabe, quelle, ausgabe, e, schema, l
     if (o.stil === "auto") {
       const wert = await bereichHelligkeit({ teile, masse, anpassen: e.anpassen, x, y, breite: g.breite, hoehe: g.hoehe }).catch(() => 0);
       if (wert >= HELL_AB) g = await logoPlakette({ ...o, hell: true });
+    }
+    if (g.glas) {
+      // Milchglas: das Bild hinter der Fläche weichzeichnen, in abgerundeter Form wieder darüberlegen
+      const m = await bild("logo-maske.png", g.glas.maske, Math.max(dauer, 1));
+      filter.push(`[${letzte}]split[glasunten][glasquelle]`,
+        `[glasquelle]crop=${g.breite}:${g.hoehe}:${x}:${y},boxblur=luma_radius=${g.glas.radius}:luma_power=2:chroma_radius=${g.glas.radius}:chroma_power=2,format=rgba[glasweich]`,
+        `[${m}:v]format=gray[glasform]`, "[glasweich][glasform]alphamerge[glas]",
+        `[glasunten][glas]overlay=${x}:${y}:format=auto[mitglas]`);
+      letzte = "mitglas";
     }
     const i = await bild("logo.png", g.png);
     filter.push(`[${letzte}][${i}:v]overlay=${x}:${y}:format=auto[mitlogo]`);

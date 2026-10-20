@@ -104,3 +104,18 @@ test("Ränder: hochkant oben Platz für die App-Leisten", () => {
   assert.deepEqual(raender({ breite: 1920, hoehe: 1080 }), { rand: 54, oben: 54 });
   assert.deepEqual(logoLage({ masse: { breite: 1920, hoehe: 1080 }, grafik: { breite: 100, hoehe: 50 }, position: "unten-rechts" }), { x: 1766, y: 976 });
 });
+
+test("Logo „glas“: halb durchsichtige, abgerundete Fläche mit Maske für den Weichzeichner", async () => {
+  const g = await logoPlakette({ logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 389, stil: "glas" });
+  assert.equal(g.breite % 2, 0);
+  assert.ok(g.glas.radius >= 4 && g.glas.radius <= Math.min(g.breite, g.hoehe) / 4);
+  const rand = await pixel(g.png, Math.round(g.breite * 0.98), Math.round(g.hoehe / 2));
+  assert.ok(rand.alpha > 60 && rand.alpha < 200, `Glas halb durchsichtig: ${rand.alpha}`);
+  assert.equal((await pixel(g.png, 0, 0)).alpha, 0); // abgerundete Ecke
+  assert.equal((await pixel(g.glas.maske, 0, 0)).farbe.join(), "0,0,0");
+  assert.equal((await pixel(g.glas.maske, g.breite / 2, g.hoehe / 2)).farbe.join(), "255,255,255");
+  // Auf einem Foto: hinter der Fläche weichgezeichnet und abgedunkelt
+  const foto = new URL("../ppicng/src/designs/gp2024/backgrounds/papagei.png", import.meta.url).pathname;
+  const bild = await fotoMitLogo({ breite: 1080, hoehe: 1080, bild: foto, logo: piraten, schema: farbschema("weiss-schwarz-orange"), logoBreite: 0.36, position: "oben-links", stil: "glas" });
+  assert.ok(bild.length > 1000);
+});

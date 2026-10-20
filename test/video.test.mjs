@@ -252,3 +252,24 @@ test("Logo „auto“: auf hellem Grund dunkel, auf dunklem hell", { skip: !ffmp
   assert.ok(ergebnis.hell.min < 80, `heller Grund, dunkle Schrift: ${JSON.stringify(ergebnis.hell)}`);
   assert.ok(ergebnis.dunkel.max > 200, `dunkler Grund, helle Schrift: ${JSON.stringify(ergebnis.dunkel)}`);
 });
+
+test("Logo „glas“ im Video: Grund hinter der Fläche dunkler, Rest unverändert", { skip: !ffmpeg && "ffmpeg fehlt" }, async () => {
+  const { loadImage, createCanvas } = await import("@napi-rs/canvas");
+  const ordner = fs.mkdtempSync(path.join(os.tmpdir(), "ppb-glas-"));
+  const ein = path.join(ordner, "hell.mp4");
+  execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0xEDE6DC:s=640x360:d=2", "-pix_fmt", "yuv420p", ein]);
+  const aus = path.join(ordner, "glas.jpg");
+  const { args } = await renderArgs({
+    eingabe: ein, quelle: await untersuche(ein), ausgabe: aus, standbild: 1, ass: null, fontsDir: "/x", zeiten: ZEITEN, video: VIDEO,
+    e: { ...EINST, format: "original", logoStil: "glas", bauchbindeAn: false, titelkarte: null, abspannAn: false },
+    schema: farbschema("weiss-schwarz-orange"), logo: logoNachId(ppicng, "laender/bayern"),
+  });
+  assert.match(args[args.indexOf("-filter_complex") + 1], /boxblur=.*alphamerge/);
+  execFileSync("ffmpeg", args, { cwd: ordner });
+  const bild = await loadImage(fs.readFileSync(aus));
+  const ctx = createCanvas(bild.width, bild.height).getContext("2d");
+  ctx.drawImage(bild, 0, 0);
+  const hell = (x, y) => [...ctx.getImageData(x, y, 1, 1).data.slice(0, 3)].reduce((s, v) => s + v, 0) / 3;
+  assert.ok(hell(30, 22) < 170, `Glas dunkelt ab: ${hell(30, 22)}`); // Rand der Fläche, neben dem Logo
+  assert.ok(hell(600, 300) > 220, "Rest bleibt hell");
+});

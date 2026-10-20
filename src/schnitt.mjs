@@ -151,3 +151,182 @@ export function cuesPruefen(cues, clips) {
     return end - start >= 100 && text ? [{ clip: c.clip, start, end, text }] : [];
   }).sort((a, b) => (a.clip === b.clip ? a.start - b.start : 0));
 }
+
+// ---------- Tonspur ----------
+// Standardmäßig hängt der Ton am Bild (a.tonspur = null): Jeder Teil bringt seinen Ton mit. Gelöst ist der Ton
+// eine eigene Liste von Abschnitten auf der Zeitachse des fertigen Videos (ohne Titelkarte):
+//   tonspur = [{ quelle: "c1", von: 2.5, bis: 10, ab: 0, lautstaerke: 0.8, stumm: true, ein: 0.5, aus: 1 }]
+// quelle: ein Clip (c1, …) oder eine eigene Tonaufnahme (t1, …, z. B. vom Ansteckmikrofon); von/bis: Sekunden in
+// der Quelle; ab: wo der Abschnitt im fertigen Video beginnt; ein/aus: Ein- und Ausblenden (Sekunden).
+// Abschnitte dürfen sich überlappen, dann werden sie gemischt – so gehen J- und L-Schnitte und Überblendungen.
+// Eine Tonaufnahme kann zu Clips synchron sein (sync: [{ clip, versatz }], Aufnahmezeit = Clipzeit + versatz);
+// dann zeigt sie die Untertitel dieser Clips.
+
+export const MAX_TON = 200;
+export const TON_BLENDE_MAX = 5;
+const r3 = (n) => Math.round(n * 1000) / 1000;
+export const tonLaenge = (s) => s.bis - s.von;
+export const tonEnde = (s) => s.ab + s.bis - s.von;
+
+/** Gekoppelter Ton als Tonspur – Ausgangspunkt, wenn man den Ton vom Bild löst. Übergänge werden zu Blenden. */
+export function tonAusSchnitt(schnitt) {
+  const anfaenge = teilAnfaenge(schnitt);
+  return schnitt.map((t, i) => {
+    const s = { quelle: t.clip, von: t.von, bis: t.bis, ab: r3(anfaenge[i]) };
+    if (t.lautstaerke !== undefined && t.lautstaerke !== 1) s.lautstaerke = t.lautstaerke;
+    if (t.stumm) s.stumm = true;
+    const ein = ueberlappung(schnitt, i);
+    const aus = ueberlappung(schnitt, i + 1);
+    if (ein) s.ein = ein;
+    if (aus) s.aus = aus;
+    return s;
+  });
+}
+
+/**
+ * Tonspur aus dem Browser prüfen. null bleibt null (Ton am Bild). Abschnitte, die erst nach dem Ende des
+ * Videos beginnen, fallen weg; was über das Ende hinausreicht, schneidet das Rendern ab.
+ * @param {unknown} spur
+ * @param {{id:string, dauer:number}[]} quellen Clips mit Ton und Tonaufnahmen
+ * @param {number} dauer Länge des fertigen Schnitts
+ */
+export function tonspurPruefen(spur, quellen, dauer) {
+  if (spur === null || spur === undefined) return null;
+  if (!Array.isArray(spur)) throw new Error("Tonspur fehlt.");
+  const laengen = new Map(quellen.map((q) => [q.id, q.dauer]));
+  const ergebnis = [];
+  for (const s of spur.slice(0, MAX_TON)) {
+    if (!s || !laengen.has(s.quelle)) continue;
+    const max = laengen.get(s.quelle);
+    const von = Math.max(0, Math.min(Number(s.von) || 0, max));
+    const bis = Math.max(0, Math.min(Number.isFinite(Number(s.bis)) ? Number(s.bis) : max, max));
+    const ab = Math.max(0, Number(s.ab) || 0);
+    if (bis - von < MIN_TEIL || ab > dauer - MIN_TEIL) continue;
+    const a = { quelle: s.quelle, von: r3(von), bis: r3(bis), ab: r3(ab) };
+    const lautstaerke = Number(s.lautstaerke);
+    if (Number.isFinite(lautstaerke) && lautstaerke !== 1) a.lautstaerke = Math.round(Math.max(0, Math.min(2, lautstaerke)) * 100) / 100;
+    if (s.stumm === true) a.stumm = true;
+    for (const feld of ["ein", "aus"]) {
+      const d = Math.min(TON_BLENDE_MAX, (bis - von) / 2, Math.max(0, Number(s[feld]) || 0));
+      if (d >= 0.05) a[feld] = Math.round(d * 100) / 100;
+    }
+    ergebnis.push(a);
+  }
+  return ergebnis.sort((x, y) => x.ab - y.ab);
+}
+
+/**
+ * Untertitel je Quelle in deren Zeit: eigene, und bei synchronen Tonaufnahmen die der Clips (verschoben).
+ * `index` zeigt weiter auf den Untertitel im Clip – so lassen sich Änderungen zurückschreiben.
+ * @param {{id:string, sync?:{clip:string, versatz:number}[]}[]} tonclips
+ */
+export function cuesJeQuelle(cues, tonclips = []) {
+  const je = new Map();
+  cues.forEach((c, index) => {
+    if (!je.has(c.clip)) je.set(c.clip, []);
+    je.get(c.clip).push({ ...c, index });
+  });
+  for (const t of tonclips) {
+    if (je.has(t.id) || !t.sync?.length) continue; // eigene Untertitel gehen vor
+    const liste = [];
+    for (const { clip, versatz } of t.sync) {
+      for (const c of je.get(clip) ?? []) liste.push({ ...c, clip: t.id, start: c.start + versatz * 1000, end: c.end + versatz * 1000 });
+    }
+    je.set(t.id, liste);
+  }
+  return je;
+}
+
+/** Untertitel des fertigen Videos bei gelöstem Ton: Sie folgen den hörbaren Abschnitten der Tonspur. */
+export function tonCues(cues, spur, tonclips = []) {
+  const je = cuesJeQuelle(cues, tonclips);
+  const ergebnis = [];
+  for (const s of spur) {
+    if (s.stumm || s.lautstaerke === 0) continue;
+    const von = s.von * 1000;
+    const bis = s.bis * 1000;
+    const versatz = s.ab * 1000;
+    for (const c of je.get(s.quelle) ?? []) {
+      if (c.end <= von || c.start >= bis) continue;
+      const start = Math.round(Math.max(c.start, von) - von + versatz);
+      const end = Math.round(Math.min(c.end, bis) - von + versatz);
+      if (end - start >= 200) ergebnis.push({ start, end, text: c.text, index: c.index });
+    }
+  }
+  // Derselbe Untertitel aus zwei überlappenden Abschnitten nur einmal
+  const gesehen = new Set();
+  return ergebnis.sort((a, b) => a.start - b.start).filter((c) => {
+    const k = `${c.index}:${Math.round(c.start / 500)}`;
+    if (gesehen.has(k)) return false;
+    gesehen.add(k);
+    return true;
+  });
+}
+
+/** Wie cuesZurueck, aber über die Tonspur: Der Untertitel gehört zur Quelle des hörbaren Abschnitts an seinem Anfang. */
+export function cuesZurueckTon(cues, spur) {
+  const ergebnis = [];
+  for (const c of cues) {
+    const t = c.start / 1000;
+    const s = spur.findLast((x) => !x.stumm && x.ab <= t && t < tonEnde(x));
+    if (!s) continue;
+    const start = (s.von + t - s.ab) * 1000;
+    const ende = Math.min(s.bis * 1000, start + (c.end - c.start));
+    if (ende - start >= 200) ergebnis.push({ clip: s.quelle, start: Math.round(start), end: Math.round(ende), text: c.text });
+  }
+  return ergebnis;
+}
+
+/**
+ * Versatz zwischen zwei Tonaufnahmen derselben Szene über ihre Lautstärkekurven (je 10 ms ein Wert):
+ * erst grob (100 ms), dann fein um den besten Treffer. Aufnahmezeit in `lang` = Zeit in `kurz` + versatz.
+ * @param {Float32Array} kurz Hüllkurve des Clips
+ * @param {Float32Array} lang Hüllkurve der Tonaufnahme
+ * @returns {{versatz:number, guete:number}|null} versatz in Sekunden, guete = Korrelation (0–1)
+ */
+export function versatzFinden(kurz, lang, raster = 0.01) {
+  // Anstiege statt Pegel: unabhängig davon, wie laut und mit welchem Mikrofon aufgenommen wurde
+  const anstiege = (h) => {
+    const d = new Float32Array(h.length);
+    for (let i = 1; i < h.length; i++) d[i] = Math.max(0, h[i] - h[i - 1]);
+    return d;
+  };
+  const verdichten = (h, n) => {
+    const d = new Float32Array(Math.floor(h.length / n));
+    for (let i = 0; i < d.length; i++) for (let k = 0; k < n; k++) d[i] += h[i * n + k];
+    return d;
+  };
+  const korrelation = (a, b, lag, schritt = 1) => {
+    // Pearson über den überlappenden Bereich; lag: a[i] ↔ b[i + lag]
+    const von = Math.max(0, -lag);
+    const bis = Math.min(a.length, b.length - lag);
+    if (bis - von < a.length * 0.5) return -1;
+    let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, n = 0;
+    for (let i = von; i < bis; i += schritt) {
+      const x = a[i], y = b[i + lag];
+      sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y; n++;
+    }
+    const kov = sab - (sa * sb) / n;
+    const nenner = Math.sqrt((saa - (sa * sa) / n) * (sbb - (sb * sb) / n));
+    return nenner > 0 ? kov / nenner : -1;
+  };
+  const a = anstiege(log(kurz));
+  const b = anstiege(log(lang));
+  const g = 10;
+  const ag = verdichten(a, g);
+  const bg = verdichten(b, g);
+  let besterLag = 0, beste = -1;
+  for (let lag = -Math.floor(ag.length / 2); lag <= bg.length - Math.floor(ag.length / 2); lag++) {
+    const k = korrelation(ag, bg, lag);
+    if (k > beste) [beste, besterLag] = [k, lag];
+  }
+  if (beste < 0.25) return null;
+  let fein = besterLag * g, guete = -1;
+  for (let lag = besterLag * g - 2 * g; lag <= besterLag * g + 2 * g; lag++) {
+    const k = korrelation(a, b, lag);
+    if (k > guete) [guete, fein] = [k, lag];
+  }
+  return guete >= 0.25 ? { versatz: r3(fein * raster), guete: Math.round(guete * 100) / 100 } : null;
+}
+
+const log = (h) => h.map((x) => Math.log10(1e-4 + x));
